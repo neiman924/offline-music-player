@@ -13,34 +13,39 @@ import com.getcapacitor.JSObject
 import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
+import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
-import com.getcapacitor.PluginMethod
 
 @CapacitorPlugin(
     name = "PlaybackNotification",
     permissions = [Permission(alias = "notifications", strings = [Manifest.permission.POST_NOTIFICATIONS])]
 )
 class PlaybackNotificationPlugin : Plugin() {
-    private val channelId = "tunestack_playback"
+    private val channelId = "melodock_playback"
     private val notificationId = 2401
+
+    @PluginMethod
+    fun requestPermission(call: PluginCall) {
+        if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) {
+            call.resolve(JSObject().put("granted", true))
+            return
+        }
+        requestPermissionForAlias("notifications", call, "permissionRequestResult")
+    }
+
+    @PermissionCallback
+    private fun permissionRequestResult(call: PluginCall) {
+        call.resolve(JSObject().put("granted", getPermissionState("notifications") == PermissionState.GRANTED))
+    }
 
     @PluginMethod
     fun update(call: PluginCall) {
         if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) {
-            requestPermissionForAlias("notifications", call, "notificationPermissionResult")
+            call.resolve()
             return
         }
-        show(call)
-    }
-
-    @PermissionCallback
-    private fun notificationPermissionResult(call: PluginCall) {
-        if (getPermissionState("notifications") == PermissionState.GRANTED) show(call) else call.resolve()
-    }
-
-    private fun show(call: PluginCall) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             manager.createNotificationChannel(NotificationChannel(channelId, "Now playing", NotificationManager.IMPORTANCE_LOW))
@@ -51,7 +56,7 @@ class PlaybackNotificationPlugin : Plugin() {
         val playing = call.getBoolean("playing", false) ?: false
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(call.getString("title", "TuneStack"))
+            .setContentTitle(call.getString("title", "Melodock"))
             .setContentText(call.getString("artist", "Unknown artist"))
             .setSubText(call.getString("album", ""))
             .setContentIntent(pendingIntent)
