@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChangeEvent, CSSProperties, FormEvent, ReactNode } from 'react'
 import { clearPlaybackNotification, updatePlaybackNotification } from './playbackNative'
+import { isNativeAndroid, pickLocalAudioFiles, pickLocalMusicFolder, playableDocumentUrl, type LocalDocument } from './localFolderNative'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,7 @@ interface Track {
   sourcePath?: string
   origin?: 'local' | 'synology' | 'radio'
   localKey?: string
+  documentUri?: string
   radioUrl?: string
   radioHomepage?: string
   radioDistanceMiles?: number
@@ -2771,9 +2773,10 @@ type LocalImportState = {
 
 const EMPTY_LOCAL_IMPORT: LocalImportState = { status: 'idle', total: 0, completed: 0, imported: 0, skipped: 0, message: '' }
 
-function LocalImportSheet({ state, onFiles, onClose, onReset, albums, playlists }: {
+function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, albums, playlists }: {
   state: LocalImportState
   onFiles: (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => void
+  onDocuments: (documents: LocalDocument[], options: { album: string; playlistId: string; newPlaylist: string }) => void
   onClose: () => void
   onReset: () => void
   albums: string[]
@@ -2784,6 +2787,11 @@ function LocalImportSheet({ state, onFiles, onClose, onReset, albums, playlists 
   const [playlistId, setPlaylistId] = useState('')
   const [newPlaylist, setNewPlaylist] = useState('')
   const busy = state.status === 'importing'
+  const destination = () => ({ album: newAlbum.trim() || album, playlistId, newPlaylist: newPlaylist.trim() })
+  const pickNative = async (kind: 'files' | 'folder') => {
+    const documents = kind === 'folder' ? await pickLocalMusicFolder() : await pickLocalAudioFiles()
+    if (documents.length) onDocuments(documents, destination())
+  }
   const pickFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.currentTarget.files
     onFiles(files, { album: newAlbum.trim() || album, playlistId, newPlaylist: newPlaylist.trim() })
@@ -2829,29 +2837,16 @@ function LocalImportSheet({ state, onFiles, onClose, onReset, albums, playlists 
 
         {!busy && (
           <div className="android-import-options">
-            <label>
-              <input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles} />
-              <span className="android-option-icon"><IconMusic size={21} /></span>
-              <span><strong>Choose audio files</strong><small>Select one or several songs</small></span>
-              <b aria-hidden="true">›</b>
-            </label>
-            <label>
-              <input
-                type="file"
-                accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma"
-                multiple
-                hidden
-                ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }}
-                onChange={pickFiles}
-              />
-              <span className="android-option-icon"><IconFolder size={21} /></span>
-              <span><strong>Choose a local music folder</strong><small>Select the folder once to add all supported songs inside it</small></span>
-              <b aria-hidden="true">›</b>
-            </label>
+            {isNativeAndroid() ? (<>
+              <button type="button" onClick={() => void pickNative('files')}><span className="android-option-icon"><IconMusic size={21} /></span><span><strong>Choose audio files</strong><small>Keep read-only links to selected songs</small></span><b aria-hidden="true">›</b></button>
+              <button type="button" onClick={() => void pickNative('folder')}><span className="android-option-icon"><IconFolder size={21} /></span><span><strong>Choose a local music folder</strong><small>Add every song without copying the folder</small></span><b aria-hidden="true">›</b></button>
+            </>) : (<>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles} /><span className="android-option-icon"><IconMusic size={21} /></span><span><strong>Choose audio files</strong><small>Select one or several songs</small></span><b aria-hidden="true">›</b></label>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }} onChange={pickFiles} /><span className="android-option-icon"><IconFolder size={21} /></span><span><strong>Choose a local music folder</strong><small>Select all supported songs inside it</small></span><b aria-hidden="true">›</b></label>
+            </>)}
           </div>
         )}
-
-        <div className="android-import-note">Music is copied into TuneStack’s private offline storage. Your original files are not changed.</div>
+        <div className="android-import-note">{isNativeAndroid() ? 'Melodock stores only read-only links and metadata. Music stays in the selected folder and plays directly from there.' : 'Browser imports may use private browser storage. The Android app uses no-copy folder references.'}</div>
         {state.status === 'done' && <button className="android-import-more" type="button" onClick={onReset}>Add more music</button>}
       </section>
     </div>
@@ -3335,6 +3330,7 @@ const NAV_LABELS: Record<NavView, string> = {
 
 function SettingsView({
   settings,
+  isPro,
   onChange,
   devices,
   onAddSource,
@@ -3349,6 +3345,7 @@ function SettingsView({
   onRadioSearchResults,
 }: {
   settings: PlayerSettings
+  isPro: boolean
   onChange: (settings: PlayerSettings) => void
   devices: NasDevice[]
   onAddSource: (device: NasDevice, tracks: Track[]) => void
@@ -3385,13 +3382,13 @@ function SettingsView({
 
       <div className="settings-grid">
         <section className="settings-panel">
-          <div className="section-eyebrow">Appearance</div>
+          <div className="section-eyebrow">Appearance · Pro</div>
           <h2>Theme</h2>
           <div className="setting-choice-grid">
             <button className={settings.theme === 'apple-dark' ? 'selected' : ''} onClick={() => onChange({ ...settings, theme: 'apple-dark' })}>
               <strong>Midnight</strong><span>Deep charcoal surfaces with vibrant artwork and controls</span>
             </button>
-            <button className={settings.theme === 'apple-light' ? 'selected' : ''} onClick={() => onChange({ ...settings, theme: 'apple-light' })}>
+            <button className={settings.theme === 'apple-light' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, theme: 'apple-light' })}>
               <strong>Daylight</strong><span>Bright, airy surfaces inspired by a native music library</span>
             </button>
           </div>
@@ -3399,7 +3396,7 @@ function SettingsView({
           <h2>Display color</h2>
           <div className="accent-choices">
             {(['pink', 'red', 'orange', 'purple', 'blue', 'teal', 'green'] as const).map(accent => (
-              <button key={accent} className={`${accent} ${settings.accent === accent ? 'selected' : ''}`} onClick={() => onChange({ ...settings, accent })}>{accent}</button>
+              <button key={accent} className={`${accent} ${settings.accent === accent ? 'selected' : ''}`} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, accent })}>{accent}</button>
             ))}
           </div>
 
@@ -3408,14 +3405,14 @@ function SettingsView({
             <button className={settings.lightColorMode === 'random' ? 'selected' : ''} onClick={() => onChange({ ...settings, lightColorMode: 'random' })}>
               <strong>Random for every song</strong><span>A fresh three-color combination based on the current track</span>
             </button>
-            <button className={settings.lightColorMode === 'artwork' ? 'selected' : ''} onClick={() => onChange({ ...settings, lightColorMode: 'artwork' })}>
+            <button className={settings.lightColorMode === 'artwork' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, lightColorMode: 'artwork' })}>
               <strong>Use album artwork</strong><span>Build the moving lights from the colors in the current cover</span>
             </button>
           </div>
 
           <h2>Density</h2>
           <div className="inline-setting">
-            <button className={settings.density === 'compact' ? 'selected' : ''} onClick={() => onChange({ ...settings, density: 'compact' })}>Compact</button>
+            <button className={settings.density === 'compact' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, density: 'compact' })}>Compact</button>
             <button className={settings.density === 'comfortable' ? 'selected' : ''} onClick={() => onChange({ ...settings, density: 'comfortable' })}>Comfortable</button>
           </div>
         </section>
@@ -3478,7 +3475,7 @@ function SettingsView({
             </span>
           </div>
           <label className={`background-analysis-card ${settings.autoAnalyzeLocal ? 'enabled' : ''}`}>
-            <input className="background-analysis-input" type="checkbox" checked={settings.autoAnalyzeLocal} onChange={event => onChange({ ...settings, autoAnalyzeLocal: event.target.checked })} />
+            <input className="background-analysis-input" type="checkbox" disabled={!isPro} checked={isPro && settings.autoAnalyzeLocal} onChange={event => isPro && onChange({ ...settings, autoAnalyzeLocal: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
             <span className="background-analysis-copy">
               <strong>Background mood analysis</strong>
@@ -3508,7 +3505,7 @@ function SettingsView({
           <div className="section-eyebrow">Lyrics &amp; metadata</div>
           <h2>Offer metadata updates after a lyrics search</h2>
           <label className={`background-analysis-card ${settings.updateMetadataFromLyrics ? 'enabled' : ''}`}>
-            <input className="background-analysis-input" type="checkbox" checked={settings.updateMetadataFromLyrics} onChange={event => onChange({ ...settings, updateMetadataFromLyrics: event.target.checked })} />
+            <input className="background-analysis-input" type="checkbox" disabled={!isPro} checked={isPro && settings.updateMetadataFromLyrics} onChange={event => isPro && onChange({ ...settings, updateMetadataFromLyrics: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
             <span className="background-analysis-copy"><strong>Metadata suggestions</strong><small>After you manually search for lyrics and a reliable match is found, ask before updating title, artist, and album. Existing artwork is always kept.</small></span>
             <span className="android-switch" aria-hidden="true"><i /></span>
@@ -3796,7 +3793,7 @@ function PlayerBar({
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-export default function App() {
+export default function App({ isPro = false }: { isPro?: boolean }) {
   const deviceProfile = useDeviceProfile()
   const [tracks, setTracks] = useState<Track[]>(() => readStored<Track[]>('tunestack:v2:tracks', []).map(track => ({ ...track, title: cleanTrackTitle(track.title || track.sourcePath || 'Unknown track') })))
   const [radioZip, setRadioZip] = useState(() => readStored<string>('tunestack:v1:radio-zip', ''))
@@ -3832,6 +3829,16 @@ export default function App() {
     return { ...DEFAULT_SETTINGS, ...stored, theme, accent, lightColorMode, navOrder }
   })
   const [localKeys, setLocalKeys] = useState<string[]>([])
+  useEffect(() => {
+    if (localStorage.getItem('melodock:no-copy-migration-v1') === 'done') return
+    const copiedImports = tracksRef.current.filter(track => track.origin === 'local' && !track.documentUri)
+    void Promise.all(copiedImports.map(async track => {
+      const db = await openLocalAudioDb()
+      await new Promise<void>(resolve => { const request = db.transaction(LOCAL_STORE_NAME, 'readwrite').objectStore(LOCAL_STORE_NAME).delete(trackLocalKey(track)); request.onsuccess = () => resolve(); request.onerror = () => resolve() })
+    })).finally(() => {
+      const removed = new Set(copiedImports.map(trackLocalKey)); setTracks(items => items.filter(track => !removed.has(trackLocalKey(track)))); setLocalKeys(keys => keys.filter(key => !removed.has(key))); localStorage.setItem('melodock:no-copy-migration-v1', 'done')
+    })
+  }, [])
   const [requestedSource, setRequestedSource] = useState<PlaybackSource>('local')
   const [activeSource, setActiveSource] = useState<PlaybackSource | null>(null)
   const [audioUrl, setAudioUrl] = useState('')
@@ -3963,8 +3970,8 @@ export default function App() {
   }, [devices, tracks])
 
   const playingFromDevice = activeTrack?.sourceId ? devices.find(device => device.id === activeTrack.sourceId) ?? null : null
-  const localAvailable = activeTrack ? localKeys.includes(trackLocalKey(activeTrack)) : false
-  const localTracks = tracks.filter(track => track.origin === 'local' || localKeys.includes(trackLocalKey(track)))
+  const localAvailable = activeTrack ? Boolean(activeTrack.documentUri) || localKeys.includes(trackLocalKey(activeTrack)) : false
+  const localTracks = tracks.filter(track => track.origin === 'local' || Boolean(track.documentUri) || localKeys.includes(trackLocalKey(track)))
   const synologyTracks = tracks.filter(track => track.origin !== 'local' && track.origin !== 'radio' && Boolean(track.sourceId) && track.sourceId !== 'local-device')
   const activeTrackKey = activeTrack ? trackLocalKey(activeTrack) : ''
   const devicePlaybackKey = playingFromDevice
@@ -4087,6 +4094,10 @@ export default function App() {
           return
         }
 
+        if (selectedTrack.documentUri && requestedSource !== 'synology') {
+          if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = '' }
+          setActiveSource('local'); setAudioUrl(playableDocumentUrl(selectedTrack.documentUri)); setPlaybackStatus('ready'); return
+        }
         const localRecord = await readLocalAudio(selectedTrack)
         let source: PlaybackSource
         let blob: Blob
@@ -4160,7 +4171,7 @@ export default function App() {
     let startTimer = 0
     const lyricsController = new AbortController()
 
-    const shouldAnalyze = settings.autoAnalyzeLocal
+    const shouldAnalyze = isPro && settings.autoAnalyzeLocal
       && Boolean(activeTrack)
       && activeTrack?.moodModelVersion !== MOOD_MODEL_VERSION
       && isPlaying
@@ -4242,7 +4253,7 @@ export default function App() {
         moodJobRef.current = { id: jobId, context: null }
       }
     }
-  }, [activeSource, activeTrack, deviceProfile.deviceClass, deviceProfile.maxAudioBytes, deviceProfile.maxAudioSeconds, isPlaying, localAvailable, playbackStatus, settings.autoAnalyzeLocal])
+  }, [activeSource, activeTrack, deviceProfile.deviceClass, deviceProfile.maxAudioBytes, deviceProfile.maxAudioSeconds, isPlaying, isPro, localAvailable, playbackStatus, settings.autoAnalyzeLocal])
 
 
   useEffect(() => () => {
@@ -4510,6 +4521,19 @@ export default function App() {
     }
   }, [activeTrack, playingFromDevice])
 
+  const importLocalDocuments = useCallback((documents: LocalDocument[], options: { album: string; playlistId: string; newPlaylist: string }) => {
+    if (!documents.length) return
+    const imported = documents.map((document): Track => {
+      const key = `document:${document.uri}`
+      return { id: stableNumericId(key), title: document.title || cleanTrackTitle(document.name), artist: document.artist || 'Unknown artist', album: options.album || document.album || document.folderName || 'Local music', duration: Math.max(0, Math.round((document.durationMs || 0) / 1000)), year: document.year || 0, genre: document.genre || 'Local', cover: '/icon-512.png', sourceId: 'local-device', sourcePath: document.relativePath || document.name, origin: 'local', localKey: key, documentUri: document.uri, metadataSource: document.title || document.artist ? 'file' : 'filename', embeddedMetadataChecked: true }
+    })
+    setTracks(items => [...items.filter(item => !imported.some(track => track.localKey === item.localKey)), ...imported])
+    const importedIds = imported.map(track => track.id)
+    if (options.newPlaylist) { const playlist: Playlist = { id: `${Date.now()}`, name: options.newPlaylist, trackIds: importedIds }; setPlaylists(items => [...items, playlist]); setSelectedPlaylistId(playlist.id) }
+    else if (options.playlistId) setPlaylists(items => items.map(item => item.id === options.playlistId ? { ...item, trackIds: Array.from(new Set([...item.trackIds, ...importedIds])) } : item))
+    setLocalImportState({ status: 'done', total: documents.length, completed: documents.length, imported: documents.length, skipped: 0, message: `${documents.length} ${documents.length === 1 ? 'song' : 'songs'} linked without copying.` })
+  }, [])
+
   const importLocalFiles = useCallback(async (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => {
     if (!files?.length) return
     const selectedFiles = Array.from(files)
@@ -4733,13 +4757,14 @@ export default function App() {
               playbackError={playbackError}
               lightColorMode={settings.lightColorMode}
               onSaveMetadata={saveActiveMetadata}
-              updateMetadataFromLyrics={settings.updateMetadataFromLyrics}
+              updateMetadataFromLyrics={isPro && settings.updateMetadataFromLyrics}
               onApplyLyricsMetadata={applyLyricsMetadata}
             />
           )}
           {view === 'settings' && (
             <SettingsView
               settings={settings}
+              isPro={isPro}
               onChange={setSettings}
               devices={devices}
               onAddSource={addSource}
@@ -4781,6 +4806,7 @@ export default function App() {
         <LocalImportSheet
           state={localImportState}
           onFiles={importLocalFiles}
+          onDocuments={importLocalDocuments}
           onClose={() => setShowLocalImport(false)}
           onReset={() => setLocalImportState(EMPTY_LOCAL_IMPORT)}
           albums={Array.from(new Set(localTracks.map(track => track.album))).filter(Boolean).sort()}
