@@ -3079,6 +3079,17 @@ input[type='range']:hover::-webkit-slider-thumb {
   margin-top: 22px;
 }
 
+.android-import-destination {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.android-import-destination label { display: grid; gap: 5px; color: var(--text-secondary); font-size: 11px; }
+.android-import-destination select,
+.android-import-destination input { min-width: 0; padding: 10px; color: var(--text-primary); background: var(--field-bg); border: 1px solid var(--hairline); border-radius: 10px; }
+
 .android-import-options label {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr) 18px;
