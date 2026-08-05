@@ -1,0 +1,41 @@
+name: Build Melodock APKs
+
+on:
+  push:
+    branches: [main, "agent/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: npm ci
+      - name: Build packaged interface
+        run: npm run mobile:build
+      - name: Sync interface into Android
+        run: npx cap sync android
+      - run: chmod +x android/gradlew
+      - name: Build Free and Pro APKs
+        working-directory: android
+        run: ./gradlew assembleFreeDebug assembleProDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Melodock-Free-APK
+          path: android/app/build/outputs/apk/free/debug/*-free-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Melodock-Pro-APK
+          path: android/app/build/outputs/apk/pro/debug/*-pro-debug.apk
