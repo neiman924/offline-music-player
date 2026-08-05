@@ -2,11 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChangeEvent, CSSProperties, FormEvent, ReactNode } from 'react'
-import {
-  getNativeShazamStatus,
-  identifyLocalAudioWithShazam,
-  type NativeShazamStatus,
-} from './shazamNative'
 import { clearPlaybackNotification, updatePlaybackNotification } from './playbackNative'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
@@ -39,19 +34,9 @@ interface Track {
   moodAnalysisError?: string
   moodModelVersion?: number
   moodLyricsUsed?: boolean
-  shazamStatus?: 'matched' | 'no-match'
-  shazamAttemptedAt?: string
-  shazamMatchedAt?: string
-  shazamId?: string
-  shazamIsrc?: string
-  shazamAppleMusicId?: string
-  shazamTitle?: string
-  shazamArtist?: string
-  shazamModelVersion?: number
-  shazamLastError?: string
   originalTitle?: string
   originalArtist?: string
-  metadataSource?: 'file' | 'filename' | 'shazam' | 'manual'
+  metadataSource?: 'file' | 'filename' | 'lyrics' | 'manual'
   embeddedMetadataChecked?: boolean
 }
 
@@ -90,7 +75,7 @@ interface PlayerSettings {
   lightColorMode: LightColorMode
   preferLocal: boolean
   autoAnalyzeLocal: boolean
-  autoIdentifyLocal: boolean
+  updateMetadataFromLyrics: boolean
   navOrder: NavView[]
 }
 
@@ -102,7 +87,7 @@ const DEFAULT_SETTINGS: PlayerSettings = {
   lightColorMode: 'random',
   preferLocal: true,
   autoAnalyzeLocal: false,
-  autoIdentifyLocal: true,
+  updateMetadataFromLyrics: false,
   navOrder: DEFAULT_NAV_ORDER,
 }
 
@@ -247,7 +232,6 @@ const LOCAL_DB_NAME = 'tunestack-local-audio'
 const LOCAL_STORE_NAME = 'tracks'
 const ARTWORK_STORE_NAME = 'artwork'
 const MOOD_MODEL_VERSION = 2
-const SHAZAM_MODEL_VERSION = 2
 
 interface LocalTrackRecord {
   key: string
@@ -365,11 +349,6 @@ type MoodAnalysisState = {
   completed: number
   total: number
   skipped: number
-  message: string
-}
-
-type ShazamIdentificationState = {
-  status: 'idle' | 'running' | 'matched' | 'no-match' | 'error'
   message: string
 }
 
@@ -2889,6 +2868,12 @@ type LyricsResult = {
   message?: string
   provider?: 'LRCLIB' | 'Lyrics.ovh'
   sourceUrl?: string
+  trackName?: string
+  artistName?: string
+  albumName?: string
+  artworkUrl?: string
+  genre?: string
+  releaseDate?: string
 }
 
 type TimedLyricLine = { time: number; text: string }
@@ -2953,6 +2938,8 @@ function NowPlayingView({
   playbackError,
   lightColorMode,
   onSaveMetadata,
+  updateMetadataFromLyrics,
+  onApplyLyricsMetadata,
 }: {
   track: Track | null
   isPlaying: boolean
@@ -2983,6 +2970,8 @@ function NowPlayingView({
   playbackError: string
   lightColorMode: LightColorMode
   onSaveMetadata: (title: string, artist: string) => void
+  updateMetadataFromLyrics: boolean
+  onApplyLyricsMetadata: (metadata: Pick<Track, 'title' | 'artist' | 'album' | 'cover' | 'genre' | 'year'>) => void
 }) {
   const [queueOpen, setQueueOpen] = useState(false)
   const [playlistOpen, setPlaylistOpen] = useState(false)
@@ -3015,7 +3004,7 @@ function NowPlayingView({
     if (ownsHistoryEntry && window.history.state?.tunestackOverlay === 'lyrics') window.history.back()
   }, [])
 
-  const runLyricsLookup = useCallback((title: string, artist: string, album: string, durationHint: number) => {
+  const runLyricsLookup = useCallback((title: string, artist: string, album: string, durationHint: number, offerMetadataUpdate = false) => {
     lyricsRequestRef.current?.abort()
     const controller = new AbortController()
     lyricsRequestRef.current = controller
@@ -3033,13 +3022,25 @@ function NowPlayingView({
         if (!response.ok && response.status !== 404) throw new Error(payload.message || 'Lyrics are temporarily unavailable.')
         setLyrics(payload)
         setLyricsStatus(payload.found ? 'ready' : 'error')
+        if (payload.found && offerMetadataUpdate && updateMetadataFromLyrics && payload.trackName && payload.artistName && track) {
+          const nextMetadata = {
+            title: payload.trackName,
+            artist: payload.artistName,
+            album: payload.albumName || track.album,
+            cover: payload.artworkUrl || track.cover,
+            genre: payload.genre || track.genre,
+            year: payload.releaseDate ? Number(payload.releaseDate.slice(0, 4)) || track.year : track.year,
+          }
+          const details = [nextMetadata.title, nextMetadata.artist, nextMetadata.album].filter(Boolean).join(' · ')
+          if (window.confirm(`Lyrics matched ${details}. Update this song’s metadata and artwork?`)) onApplyLyricsMetadata(nextMetadata)
+        }
       })
       .catch(cause => {
         if (cause instanceof Error && cause.name === 'AbortError') return
         setLyrics({ found: false, message: cause instanceof Error ? cause.message : 'Lyrics are temporarily unavailable.' })
         setLyricsStatus('error')
       })
-  }, [])
+  }, [onApplyLyricsMetadata, track, updateMetadataFromLyrics])
 
   useEffect(() => {
     closeLyrics()
@@ -3076,9 +3077,8 @@ function NowPlayingView({
       }, 0)
       return () => window.clearTimeout(timer)
     }
-    const useShazamMetadata = track.metadataSource === 'shazam'
-    const title = useShazamMetadata ? track.shazamTitle?.trim() || track.title : track.title
-    const artist = lyricsSearchArtist(useShazamMetadata ? track.shazamArtist?.trim() || track.artist : track.artist)
+    const title = track.title
+    const artist = lyricsSearchArtist(track.artist)
     const album = track.album
     const durationHint = track.duration || 0
     const timer = window.setTimeout(() => {
@@ -3296,7 +3296,7 @@ function NowPlayingView({
             const title = lyricsTitle.trim()
             const artist = lyricsArtist.trim()
             onSaveMetadata(title, artist)
-            runLyricsLookup(title, artist, track.album, duration || track.duration || 0)
+            runLyricsLookup(title, artist, track.album, duration || track.duration || 0, true)
           }}>
             <label>Title<input value={lyricsTitle} onChange={event => setLyricsTitle(event.target.value)} /></label>
             <label>Artist<input value={lyricsArtist} onChange={event => setLyricsArtist(event.target.value)} /></label>
@@ -3317,7 +3317,7 @@ function NowPlayingView({
           </div>
           <footer>
             {lyrics?.provider === 'Lyrics.ovh' ? <>Lyrics provided by <a href="https://lyricsovh.docs.apiary.io/" target="_blank" rel="noreferrer">Lyrics.ovh</a></> : <>Lyrics provided by <a href="https://lrclib.net" target="_blank" rel="noreferrer">LRCLIB</a></>}
-            <span>Shazam matches update these fields automatically. Manual corrections are saved when you search again.</span>
+            <span>{updateMetadataFromLyrics ? 'A reliable manual lyrics search can offer to update metadata and artwork.' : 'Metadata updates from lyrics matches are off in Settings.'}</span>
           </footer>
         </section>
       )}
@@ -3349,8 +3349,6 @@ function SettingsView({
   localTracks,
   deviceProfile,
   moodAnalysis,
-  shazamStatus,
-  shazamIdentification,
   radioZip,
   radioLocation,
   radioStationCount,
@@ -3365,8 +3363,6 @@ function SettingsView({
   localTracks: Track[]
   deviceProfile: DeviceProfile
   moodAnalysis: MoodAnalysisState
-  shazamStatus: NativeShazamStatus
-  shazamIdentification: ShazamIdentificationState
   radioZip: string
   radioLocation: string
   radioStationCount: number
@@ -3375,9 +3371,6 @@ function SettingsView({
   const analyzedMoodCount = localTracks.filter(track => track.mood && track.moodModelVersion === MOOD_MODEL_VERSION).length
   const retryMoodCount = localTracks.filter(track => track.moodModelVersion !== MOOD_MODEL_VERSION && track.moodAnalysisError).length
   const pendingMoodCount = Math.max(0, localTracks.length - analyzedMoodCount - retryMoodCount)
-  const shazamMatchedCount = localTracks.filter(track => track.shazamStatus === 'matched').length
-  const shazamNoMatchCount = localTracks.filter(track => track.shazamStatus === 'no-match').length
-  const shazamPendingCount = Math.max(0, localTracks.length - shazamMatchedCount - shazamNoMatchCount)
 
   function moveNav(index: number, direction: -1 | 1) {
     const nextIndex = index + direction
@@ -3517,46 +3510,16 @@ function SettingsView({
           </div>
         </section>
 
-        <section className="settings-panel shazam-panel">
-          <div className="section-eyebrow">Native Android</div>
-          <h2>Identify local music with Shazam</h2>
-          <label className={`background-analysis-card ${settings.autoIdentifyLocal && shazamStatus.available ? 'enabled' : ''} ${!shazamStatus.available ? 'unavailable' : ''}`}>
-            <input
-              className="background-analysis-input"
-              type="checkbox"
-              checked={settings.autoIdentifyLocal}
-              disabled={!shazamStatus.available}
-              onChange={event => onChange({ ...settings, autoIdentifyLocal: event.target.checked })}
-            />
+        <section className="settings-panel lyrics-metadata-panel">
+          <div className="section-eyebrow">Lyrics &amp; metadata</div>
+          <h2>Offer metadata updates after a lyrics search</h2>
+          <label className={`background-analysis-card ${settings.updateMetadataFromLyrics ? 'enabled' : ''}`}>
+            <input className="background-analysis-input" type="checkbox" checked={settings.updateMetadataFromLyrics} onChange={event => onChange({ ...settings, updateMetadataFromLyrics: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
-            <span className="background-analysis-copy">
-              <strong>Automatic Shazam identification</strong>
-              <small>
-                {shazamStatus.available
-                  ? 'Identify each local song once while it plays, save the corrected title and artist, then permanently skip it.'
-                  : shazamStatus.message || 'Install the native Android APK to enable ShazamKit.'}
-              </small>
-            </span>
+            <span className="background-analysis-copy"><strong>Metadata and artwork suggestions</strong><small>After you manually search for lyrics and a reliable match is found, ask before updating title, artist, album, genre, year, and artwork.</small></span>
             <span className="android-switch" aria-hidden="true"><i /></span>
           </label>
-          <p>The original title and artist are retained for undo. Local audio is converted to a non-reversible Shazam signature before matching.</p>
-          <div className="mood-summary">
-            <strong>{shazamMatchedCount}</strong>
-            <span>matched · {shazamNoMatchCount} checked with no match · {shazamPendingCount} remaining</span>
-          </div>
-          {shazamIdentification.message && (
-            <div className={`mood-message ${shazamIdentification.status === 'matched' ? 'done' : shazamIdentification.status}`}>
-              {shazamIdentification.message}
-            </div>
-          )}
-          <div className={`auto-analysis-state ${settings.autoIdentifyLocal && shazamStatus.available ? 'enabled' : ''}`}>
-            <span aria-hidden="true" />
-            {!shazamStatus.available
-              ? 'Waiting for the configured Android APK'
-              : settings.autoIdentifyLocal
-                ? 'One-time Shazam identification is enabled'
-                : 'Automatic Shazam identification is off'}
-          </div>
+          <p>This never runs or asks just because a song starts playing. It is off by default and always requires your approval.</p>
         </section>
 
         <section className="settings-panel settings-wide source-settings-panel">
@@ -3882,13 +3845,6 @@ export default function App() {
   const [playbackError, setPlaybackError] = useState('')
   const [downloadState, setDownloadState] = useState<DownloadState>('idle')
   const [moodAnalysis, setMoodAnalysis] = useState<MoodAnalysisState>({ status: 'idle', completed: 0, total: 0, skipped: 0, message: '' })
-  const [shazamStatus, setShazamStatus] = useState<NativeShazamStatus>({
-    available: false,
-    configured: false,
-    platform: 'web',
-    message: 'Checking native ShazamKit…',
-  })
-  const [shazamIdentification, setShazamIdentification] = useState<ShazamIdentificationState>({ status: 'idle', message: '' })
   const [showLocalImport, setShowLocalImport] = useState(false)
   const [localImportState, setLocalImportState] = useState<LocalImportState>(EMPTY_LOCAL_IMPORT)
   const [progress, setProgress] = useState(0)
@@ -3897,7 +3853,6 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const objectUrlRef = useRef('')
   const moodJobRef = useRef<{ id: number; context: AudioContext | null }>({ id: 0, context: null })
-  const shazamJobRef = useRef(0)
   const tracksRef = useRef(tracks)
   const radioTracksRef = useRef(radioTracks)
   const artworkObjectUrlsRef = useRef<Map<string, string>>(new Map())
@@ -3983,13 +3938,6 @@ export default function App() {
     return () => { cancelled = true }
   }, [])
   useEffect(() => {
-    let cancelled = false
-    getNativeShazamStatus().then(status => {
-      if (!cancelled) setShazamStatus(status)
-    })
-    return () => { cancelled = true }
-  }, [])
-  useEffect(() => {
     if (!devices.length) return
     let cancelled = false
     const savedDevices = [...devices]
@@ -4053,7 +4001,7 @@ export default function App() {
 
   const cacheEmbeddedMetadata = useCallback(async (track: Track, audioBlob: Blob) => {
     const key = trackLocalKey(track)
-    if (track.embeddedMetadataChecked || track.metadataSource === 'shazam' || track.metadataSource === 'manual' || metadataJobsRef.current.has(key)) return
+    if (track.embeddedMetadataChecked || track.metadataSource === 'lyrics' || track.metadataSource === 'manual' || metadataJobsRef.current.has(key)) return
     metadataJobsRef.current.add(key)
     try {
       const embedded = await extractEmbeddedTrackMetadata(audioBlob)
@@ -4302,129 +4250,6 @@ export default function App() {
     }
   }, [activeSource, activeTrack, deviceProfile.deviceClass, deviceProfile.maxAudioBytes, deviceProfile.maxAudioSeconds, isPlaying, localAvailable, playbackStatus, settings.autoAnalyzeLocal])
 
-  useEffect(() => {
-    const jobId = shazamJobRef.current + 1
-    shazamJobRef.current = jobId
-    let cancelled = false
-    let startTimer = 0
-
-    const currentShazamResult = activeTrack?.shazamModelVersion === SHAZAM_MODEL_VERSION
-      && (
-        (activeTrack.shazamStatus === 'matched' && Boolean(activeTrack.shazamTitle || activeTrack.shazamArtist))
-        || activeTrack.shazamStatus === 'no-match'
-      )
-    const shouldIdentify = settings.autoIdentifyLocal
-      && shazamStatus.available
-      && Boolean(activeTrack)
-      && !currentShazamResult
-      && isPlaying
-      && activeSource === 'local'
-      && localAvailable
-      && playbackStatus === 'ready'
-
-    if (!shouldIdentify || !activeTrack) {
-      queueMicrotask(() => {
-        setShazamIdentification(current => current.status === 'running' ? { status: 'idle', message: '' } : current)
-      })
-      return () => { cancelled = true }
-    }
-
-    const targetKey = activeTrackKey
-    const target = tracksRef.current.find(item => trackLocalKey(item) === targetKey) || activeTrack
-    queueMicrotask(() => {
-      if (!cancelled && shazamJobRef.current === jobId) {
-        setShazamIdentification({ status: 'running', message: `Identifying “${target.title}” with Shazam…` })
-      }
-    })
-
-    const identifyTrack = async () => {
-      try {
-        const record = await readLocalAudio(target)
-        if (cancelled || shazamJobRef.current !== jobId) return
-        if (!record) throw new Error('The local audio copy is missing.')
-
-        const result = await identifyLocalAudioWithShazam(record.blob)
-        if (cancelled || shazamJobRef.current !== jobId) return
-
-        const attemptedAt = new Date().toISOString()
-        const matchedTitle = result.title?.trim()
-        const matchedArtist = result.artist?.trim()
-        const hasUsefulMetadata = result.status === 'matched' && Boolean(matchedTitle || matchedArtist)
-        const metadataPatch: Partial<Track> = hasUsefulMetadata
-          ? {
-              title: matchedTitle || target.title,
-              artist: matchedArtist || target.artist,
-              cover: result.artworkUrl?.trim() || target.cover,
-              originalTitle: target.originalTitle || target.title,
-              originalArtist: target.originalArtist || target.artist,
-              metadataSource: 'shazam',
-              shazamTitle: matchedTitle,
-              shazamArtist: matchedArtist,
-              shazamStatus: 'matched',
-              shazamModelVersion: SHAZAM_MODEL_VERSION,
-              shazamAttemptedAt: attemptedAt,
-              shazamMatchedAt: attemptedAt,
-              shazamId: result.shazamId,
-              shazamIsrc: result.isrc,
-              shazamAppleMusicId: result.appleMusicId,
-              shazamLastError: undefined,
-            }
-          : {
-              shazamStatus: 'no-match',
-              shazamModelVersion: SHAZAM_MODEL_VERSION,
-              shazamAttemptedAt: attemptedAt,
-              shazamLastError: undefined,
-            }
-        const newestTrack = tracksRef.current.find(item => trackLocalKey(item) === targetKey) || target
-        const updatedTrack: Track = { ...newestTrack, ...metadataPatch }
-
-        setTracks(items => items.map(item => trackLocalKey(item) === targetKey ? { ...item, ...metadataPatch } : item))
-        setActiveTrack(current => current && trackLocalKey(current) === targetKey ? { ...current, ...metadataPatch } : current)
-        await saveLocalAudio(updatedTrack, record.blob)
-
-        if (hasUsefulMetadata) {
-          setShazamIdentification({
-            status: 'matched',
-            message: `Saved as “${updatedTrack.title}” by ${updatedTrack.artist}. This track is permanently marked as identified.`,
-          })
-        } else {
-          setShazamIdentification({
-            status: 'no-match',
-            message: `No Shazam match was found for “${target.title}”. It is marked as checked and will not run again automatically.`,
-          })
-        }
-      } catch (cause) {
-        if (cancelled || shazamJobRef.current !== jobId) return
-        const reason = (cause instanceof Error ? cause.message : 'Shazam identification failed.').slice(0, 180)
-        const attemptedAt = new Date().toISOString()
-        setTracks(items => items.map(item => trackLocalKey(item) === targetKey
-          ? { ...item, shazamAttemptedAt: attemptedAt, shazamLastError: reason }
-          : item))
-        setShazamIdentification({
-          status: 'error',
-          message: `Could not identify “${target.title}”. ${reason} It will retry on a future play.`,
-        })
-      }
-    }
-
-    startTimer = window.setTimeout(identifyTrack, 1200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(startTimer)
-    }
-  }, [
-    activeSource,
-    activeTrack?.shazamArtist,
-    activeTrack?.shazamModelVersion,
-    activeTrack?.shazamStatus,
-    activeTrack?.shazamTitle,
-    activeTrackKey,
-    isPlaying,
-    localAvailable,
-    playbackStatus,
-    settings.autoIdentifyLocal,
-    shazamStatus.available,
-  ])
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
@@ -4439,6 +4264,19 @@ export default function App() {
       artist: artist.trim(),
       metadataSource: 'manual',
     }
+    setTracks(items => items.map(item => trackLocalKey(item) === activeTrackKey ? { ...item, ...metadataPatch } : item))
+    setActiveTrack(current => current && trackLocalKey(current) === activeTrackKey ? { ...current, ...metadataPatch } : current)
+    void (async () => {
+      const latestTrack = tracksRef.current.find(item => trackLocalKey(item) === activeTrackKey)
+      if (!latestTrack) return
+      const record = await readLocalAudio(latestTrack)
+      if (record) await saveLocalAudio({ ...latestTrack, ...metadataPatch }, record.blob)
+    })().catch(() => undefined)
+  }, [activeTrackKey])
+
+  const applyLyricsMetadata = useCallback((metadata: Pick<Track, 'title' | 'artist' | 'album' | 'cover' | 'genre' | 'year'>) => {
+    if (!activeTrackKey) return
+    const metadataPatch: Partial<Track> = { ...metadata, metadataSource: 'lyrics' }
     setTracks(items => items.map(item => trackLocalKey(item) === activeTrackKey ? { ...item, ...metadataPatch } : item))
     setActiveTrack(current => current && trackLocalKey(current) === activeTrackKey ? { ...current, ...metadataPatch } : current)
     void (async () => {
@@ -4901,6 +4739,8 @@ export default function App() {
               playbackError={playbackError}
               lightColorMode={settings.lightColorMode}
               onSaveMetadata={saveActiveMetadata}
+              updateMetadataFromLyrics={settings.updateMetadataFromLyrics}
+              onApplyLyricsMetadata={applyLyricsMetadata}
             />
           )}
           {view === 'settings' && (
@@ -4914,8 +4754,6 @@ export default function App() {
               localTracks={localTracks}
               deviceProfile={deviceProfile}
               moodAnalysis={moodAnalysis}
-              shazamStatus={shazamStatus}
-              shazamIdentification={shazamIdentification}
               radioZip={radioZip}
               radioLocation={radioLocation}
               radioStationCount={radioTracks.length}
