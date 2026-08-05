@@ -23,16 +23,25 @@ import com.getcapacitor.annotation.PermissionCallback
 class PlaybackNotificationPlugin : Plugin() {
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            notifyListeners("command", JSObject().put("command", intent?.getStringExtra("command") ?: return))
+            val command = intent?.getStringExtra("command") ?: return
+            notifyListeners("command", JSObject().put("command", command))
         }
     }
 
     override fun load() {
-        ContextCompat.registerReceiver(context, commandReceiver, IntentFilter(PlaybackService.ACTION_COMMAND), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(
+            context,
+            commandReceiver,
+            IntentFilter(PlaybackService.ACTION_COMMAND),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun handleOnDestroy() {
-        try { context.unregisterReceiver(commandReceiver) } catch (_: IllegalArgumentException) { }
+        try {
+            context.unregisterReceiver(commandReceiver)
+        } catch (_: IllegalArgumentException) {
+        }
         super.handleOnDestroy()
     }
 
@@ -47,24 +56,47 @@ class PlaybackNotificationPlugin : Plugin() {
 
     @PermissionCallback
     private fun permissionRequestResult(call: PluginCall) {
-        call.resolve(JSObject().put("granted", getPermissionState("notifications") == PermissionState.GRANTED))
+        call.resolve(
+            JSObject().put(
+                "granted",
+                Build.VERSION.SDK_INT < 33 ||
+                    getPermissionState("notifications") == PermissionState.GRANTED
+            )
+        )
     }
 
     @PluginMethod
     fun update(call: PluginCall) {
-        if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) {
-            call.resolve()
+        val permissionGranted =
+            Build.VERSION.SDK_INT < 33 ||
+                getPermissionState("notifications") == PermissionState.GRANTED
+
+        if (!permissionGranted) {
+            call.resolve(
+                JSObject()
+                    .put("shown", false)
+                    .put("permissionRequired", true)
+            )
             return
         }
-        val intent = Intent(context, PlaybackService::class.java).apply {
-            action = PlaybackService.ACTION_UPDATE
-            putExtra("title", call.getString("title", "Melodock"))
-            putExtra("artist", call.getString("artist", "Unknown artist"))
-            putExtra("album", call.getString("album", ""))
-            putExtra("playing", call.getBoolean("playing", false) ?: false)
+
+        try {
+            val intent = Intent(context, PlaybackService::class.java).apply {
+                action = PlaybackService.ACTION_UPDATE
+                putExtra("title", call.getString("title", "Melodock"))
+                putExtra("artist", call.getString("artist", "Unknown artist"))
+                putExtra("album", call.getString("album", ""))
+                putExtra("playing", call.getBoolean("playing", false) ?: false)
+            }
+            ContextCompat.startForegroundService(context, intent)
+            call.resolve(
+                JSObject()
+                    .put("shown", true)
+                    .put("permissionRequired", false)
+            )
+        } catch (error: Exception) {
+            call.reject("The playback notification could not be started.", error)
         }
-        ContextCompat.startForegroundService(context, intent)
-        call.resolve(JSObject())
     }
 
     @PluginMethod
