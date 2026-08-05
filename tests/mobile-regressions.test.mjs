@@ -26,4 +26,12 @@ test('Android declares a foreground media playback service with controls', () =>
   assert.match(service, /MediaStyle\(\)/)
   assert.match(service, /"Previous"/)
   assert.match(service, /"Next"/)
+  assert.match(service, /FLAG_HANDLES_MEDIA_BUTTONS/)
+  assert.match(service, /setPlaybackState/)
+  assert.match(service, /override fun onPlay\(\)/)
+  assert.match(service, /override fun onPause\(\)/)
+})
+
+test('Bluetooth connection cannot autoplay without an active Melodock track', () => {
+  assert.match(service, /if \(hasTrack\) dispatchCommand\("play"\)/)
 })
