@@ -6,6 +6,7 @@ import com.getcapacitor.Plugin
 
 class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        registerPlugin(PlaybackNotificationPlugin::class.java)
         val shazamPluginClassName = if (BuildConfig.SHAZAMKIT_AVAILABLE) {
             "com.neiman.tunestack.ShazamIdentifierNativePlugin"
         } else {
