@@ -2871,9 +2871,6 @@ type LyricsResult = {
   trackName?: string
   artistName?: string
   albumName?: string
-  artworkUrl?: string
-  genre?: string
-  releaseDate?: string
 }
 
 type TimedLyricLine = { time: number; text: string }
@@ -2971,7 +2968,7 @@ function NowPlayingView({
   lightColorMode: LightColorMode
   onSaveMetadata: (title: string, artist: string) => void
   updateMetadataFromLyrics: boolean
-  onApplyLyricsMetadata: (metadata: Pick<Track, 'title' | 'artist' | 'album' | 'cover' | 'genre' | 'year'>) => void
+  onApplyLyricsMetadata: (metadata: Pick<Track, 'title' | 'artist' | 'album'>) => void
 }) {
   const [queueOpen, setQueueOpen] = useState(false)
   const [playlistOpen, setPlaylistOpen] = useState(false)
@@ -3027,12 +3024,9 @@ function NowPlayingView({
             title: payload.trackName,
             artist: payload.artistName,
             album: payload.albumName || track.album,
-            cover: payload.artworkUrl || track.cover,
-            genre: payload.genre || track.genre,
-            year: payload.releaseDate ? Number(payload.releaseDate.slice(0, 4)) || track.year : track.year,
           }
           const details = [nextMetadata.title, nextMetadata.artist, nextMetadata.album].filter(Boolean).join(' · ')
-          if (window.confirm(`Lyrics matched ${details}. Update this song’s metadata and artwork?`)) onApplyLyricsMetadata(nextMetadata)
+          if (window.confirm(`Lyrics matched ${details}. Update this song’s title, artist, and album? Existing artwork will be kept.`)) onApplyLyricsMetadata(nextMetadata)
         }
       })
       .catch(cause => {
@@ -3317,7 +3311,7 @@ function NowPlayingView({
           </div>
           <footer>
             {lyrics?.provider === 'Lyrics.ovh' ? <>Lyrics provided by <a href="https://lyricsovh.docs.apiary.io/" target="_blank" rel="noreferrer">Lyrics.ovh</a></> : <>Lyrics provided by <a href="https://lrclib.net" target="_blank" rel="noreferrer">LRCLIB</a></>}
-            <span>{updateMetadataFromLyrics ? 'A reliable manual lyrics search can offer to update metadata and artwork.' : 'Metadata updates from lyrics matches are off in Settings.'}</span>
+            <span>{updateMetadataFromLyrics ? 'A reliable manual lyrics search can offer metadata updates while keeping existing artwork.' : 'Metadata updates from lyrics matches are off in Settings.'}</span>
           </footer>
         </section>
       )}
@@ -3516,7 +3510,7 @@ function SettingsView({
           <label className={`background-analysis-card ${settings.updateMetadataFromLyrics ? 'enabled' : ''}`}>
             <input className="background-analysis-input" type="checkbox" checked={settings.updateMetadataFromLyrics} onChange={event => onChange({ ...settings, updateMetadataFromLyrics: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
-            <span className="background-analysis-copy"><strong>Metadata and artwork suggestions</strong><small>After you manually search for lyrics and a reliable match is found, ask before updating title, artist, album, genre, year, and artwork.</small></span>
+            <span className="background-analysis-copy"><strong>Metadata suggestions</strong><small>After you manually search for lyrics and a reliable match is found, ask before updating title, artist, and album. Existing artwork is always kept.</small></span>
             <span className="android-switch" aria-hidden="true"><i /></span>
           </label>
           <p>This never runs or asks just because a song starts playing. It is off by default and always requires your approval.</p>
@@ -4274,7 +4268,7 @@ export default function App() {
     })().catch(() => undefined)
   }, [activeTrackKey])
 
-  const applyLyricsMetadata = useCallback((metadata: Pick<Track, 'title' | 'artist' | 'album' | 'cover' | 'genre' | 'year'>) => {
+  const applyLyricsMetadata = useCallback((metadata: Pick<Track, 'title' | 'artist' | 'album'>) => {
     if (!activeTrackKey) return
     const metadataPatch: Partial<Track> = { ...metadata, metadataSource: 'lyrics' }
     setTracks(items => items.map(item => trackLocalKey(item) === activeTrackKey ? { ...item, ...metadataPatch } : item))
