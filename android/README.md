@@ -1,8 +1,8 @@
 # Tunestack Android APK
 
 This Android project packages the Tunestack phone/tablet interface. It builds
-and installs without private credentials. Optional metadata and artwork
-suggestions use reliable manual lyrics matches and always require approval.
+and installs without private credentials. Optional metadata suggestions use
+reliable manual lyrics matches, keep existing artwork, and require approval.
 
 ## Build
 
