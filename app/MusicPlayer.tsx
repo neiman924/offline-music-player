@@ -7,6 +7,7 @@ import {
   identifyLocalAudioWithShazam,
   type NativeShazamStatus,
 } from './shazamNative'
+import { clearPlaybackNotification, updatePlaybackNotification } from './playbackNative'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -2791,16 +2792,22 @@ type LocalImportState = {
 
 const EMPTY_LOCAL_IMPORT: LocalImportState = { status: 'idle', total: 0, completed: 0, imported: 0, skipped: 0, message: '' }
 
-function LocalImportSheet({ state, onFiles, onClose, onReset }: {
+function LocalImportSheet({ state, onFiles, onClose, onReset, albums, playlists }: {
   state: LocalImportState
-  onFiles: (files: FileList | null) => void
+  onFiles: (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => void
   onClose: () => void
   onReset: () => void
+  albums: string[]
+  playlists: Playlist[]
 }) {
+  const [album, setAlbum] = useState('')
+  const [newAlbum, setNewAlbum] = useState('')
+  const [playlistId, setPlaylistId] = useState('')
+  const [newPlaylist, setNewPlaylist] = useState('')
   const busy = state.status === 'importing'
   const pickFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.currentTarget.files
-    onFiles(files)
+    onFiles(files, { album: newAlbum.trim() || album, playlistId, newPlaylist: newPlaylist.trim() })
     event.currentTarget.value = ''
   }
 
@@ -2812,7 +2819,7 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
           <span className="android-sheet-icon"><IconDownload size={22} /></span>
           <span>
             <h2 id="local-import-title">Add music from this device</h2>
-            <p>Choose individual songs or an entire music folder using Android’s file picker.</p>
+            <p>Choose a local music folder to add every supported song, or select individual files.</p>
           </span>
           <button className="android-sheet-close" type="button" onClick={onClose} disabled={busy} aria-label="Close music importer">×</button>
         </header>
@@ -2829,6 +2836,15 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
           <div className={`android-import-result ${state.status}`} role="status">
             <IconCheck size={18} />
             <span><strong>{state.message}</strong>{state.skipped > 0 && <small>{state.skipped} unsupported or unreadable files skipped.</small>}</span>
+          </div>
+        )}
+
+        {!busy && (
+          <div className="android-import-destination">
+            <label><span>Album</span><select value={album} onChange={event => { setAlbum(event.target.value); setNewAlbum('') }}><option value="">Keep the album from each file</option>{albums.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
+            <label><span>Or create a new album</span><input value={newAlbum} onChange={event => { setNewAlbum(event.target.value); if (event.target.value) setAlbum('') }} placeholder="New album name" /></label>
+            <label><span>Playlist (optional)</span><select value={playlistId} onChange={event => { setPlaylistId(event.target.value); setNewPlaylist('') }}><option value="">Do not add to a playlist</option>{playlists.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label><span>Or create a new playlist</span><input value={newPlaylist} onChange={event => { setNewPlaylist(event.target.value); if (event.target.value) setPlaylistId('') }} placeholder="New playlist name" /></label>
           </div>
         )}
 
@@ -2850,7 +2866,7 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
                 onChange={pickFiles}
               />
               <span className="android-option-icon"><IconFolder size={21} /></span>
-              <span><strong>Choose a music folder</strong><small>Import supported songs inside the selected folder</small></span>
+              <span><strong>Choose a local music folder</strong><small>Select the folder once to add all supported songs inside it</small></span>
               <b aria-hidden="true">›</b>
             </label>
           </div>
@@ -4615,6 +4631,19 @@ export default function App() {
   }, [activeTrack, duration, isPlaying, next, playbackStatus, prev, seek])
 
   useEffect(() => {
+    if (!activeTrack) {
+      void clearPlaybackNotification()
+      return
+    }
+    void updatePlaybackNotification({
+      title: activeTrack.title,
+      artist: activeTrack.artist,
+      album: activeTrack.album,
+      playing: isPlaying && playbackStatus !== 'error',
+    })
+  }, [activeTrack, isPlaying, playbackStatus])
+
+  useEffect(() => {
     if (!('mediaSession' in navigator) || !activeTrack || !Number.isFinite(duration) || duration <= 0) return
     try {
       navigator.mediaSession.setPositionState({
@@ -4649,7 +4678,7 @@ export default function App() {
     }
   }, [activeTrack, playingFromDevice])
 
-  const importLocalFiles = useCallback(async (files: FileList | null) => {
+  const importLocalFiles = useCallback(async (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => {
     if (!files?.length) return
     const selectedFiles = Array.from(files)
     setLocalImportState({ status: 'importing', total: selectedFiles.length, completed: 0, imported: 0, skipped: 0, message: '' })
@@ -4680,7 +4709,7 @@ export default function App() {
         id: stableTrackId(key),
         title,
         artist: embeddedMetadata?.artist || filenameParts?.[1]?.trim() || folderArtist || 'Unknown artist',
-        album: embeddedMetadata?.album || folderAlbum,
+        album: options.album || embeddedMetadata?.album || folderAlbum,
         duration: detectedDuration || 0,
         year: embeddedMetadata?.year || 0,
         genre: embeddedMetadata?.genre || 'Local',
@@ -4707,6 +4736,16 @@ export default function App() {
     if (imported.length) {
       setTracks(items => [...items.filter(item => !imported.some(track => track.localKey === item.localKey)), ...imported])
       setLocalKeys(keys => Array.from(new Set([...keys, ...newKeys])))
+      const importedIds = imported.map(track => track.id)
+      if (options.newPlaylist) {
+        const playlist: Playlist = { id: `${Date.now()}`, name: options.newPlaylist, trackIds: importedIds }
+        setPlaylists(items => [...items, playlist])
+        setSelectedPlaylistId(playlist.id)
+      } else if (options.playlistId) {
+        setPlaylists(items => items.map(item => item.id === options.playlistId
+          ? { ...item, trackIds: Array.from(new Set([...item.trackIds, ...importedIds])) }
+          : item))
+      }
       setView('local')
       setLocalImportState({ status: 'done', total: selectedFiles.length, completed, imported: imported.length, skipped, message: `${imported.length} ${imported.length === 1 ? 'track' : 'tracks'} added to Local Music.` })
       void (async () => {
@@ -4912,6 +4951,8 @@ export default function App() {
           onFiles={importLocalFiles}
           onClose={() => setShowLocalImport(false)}
           onReset={() => setLocalImportState(EMPTY_LOCAL_IMPORT)}
+          albums={Array.from(new Set(localTracks.map(track => track.album))).filter(Boolean).sort()}
+          playlists={playlists}
         />
       )}
     </div>
