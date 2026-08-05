@@ -8,8 +8,8 @@ android {
         applicationId "com.neiman.melodock.pro"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6
-        versionName "1.5"
+        versionCode 7
+        versionName "1.6"
         resValue "string", "app_name", "Melodock Pro"
         buildConfigField "boolean", "PRO_EDITION", "true"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
