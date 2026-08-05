@@ -1,26 +1,35 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 
-def localProperties = new Properties()
-def localPropertiesFile = rootProject.file('local.properties')
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.withInputStream { localProperties.load(it) }
-}
-
 android {
     namespace = "com.neiman.tunestack"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.neiman.tunestack"
+        applicationId "com.neiman.melodock"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3
-        versionName "1.2"
+        versionCode 4
+        versionName "1.3"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    flavorDimensions += "edition"
+    productFlavors {
+        free {
+            dimension "edition"
+            applicationIdSuffix ".free"
+            versionNameSuffix "-free"
+            resValue "string", "app_name", "Melodock Free"
+            buildConfigField "boolean", "PRO_EDITION", "false"
+        }
+        pro {
+            dimension "edition"
+            applicationIdSuffix ".pro"
+            versionNameSuffix "-pro"
+            resValue "string", "app_name", "Melodock Pro"
+            buildConfigField "boolean", "PRO_EDITION", "true"
         }
     }
     buildTypes {
@@ -29,22 +38,16 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
-    buildFeatures {
-        buildConfig true
-    }
+    buildFeatures { buildConfig true }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
-    kotlinOptions {
-        jvmTarget = '21'
-    }
+    kotlinOptions { jvmTarget = '21' }
 }
 
 repositories {
-    flatDir{
-        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
-    }
+    flatDir { dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs' }
 }
 
 dependencies {
@@ -68,9 +71,7 @@ apply from: 'capacitor.build.gradle'
 
 try {
     def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
-        apply plugin: 'com.google.gms.google-services'
-    }
+    if (servicesJSON.text) apply plugin: 'com.google.gms.google-services'
 } catch(Exception e) {
-    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+    logger.info("google-services.json not found, google-services plugin not applied")
 }
