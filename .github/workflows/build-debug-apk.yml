@@ -37,20 +37,20 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
-      - name: Sync Capacitor Android project
-        run: npx cap sync android
+      - name: Build and sync packaged interface
+        run: npm run android:sync
 
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Stage APK with a stable filename
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk Tunestack-debug.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Melodock-Pro-1.5-debug.apk
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Tunestack-debug-apk
-          path: Tunestack-debug.apk
+          name: Melodock-Pro-1.5-debug-apk
+          path: Melodock-Pro-1.5-debug.apk
           if-no-files-found: error
           retention-days: 30

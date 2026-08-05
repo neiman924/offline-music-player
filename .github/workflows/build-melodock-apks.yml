@@ -1,4 +1,4 @@
-name: Build Melodock APKs
+name: Build Melodock Pro APK
 
 on:
   push:
@@ -30,14 +30,11 @@ jobs:
       - name: Sync interface into Android
         run: npx cap sync android
       - run: chmod +x android/gradlew
-      - name: Build Free and Pro APKs
+      - name: Build Melodock Pro APK
         working-directory: android
-        run: ./gradlew assembleFreeDebug assembleProDebug
+        run: ./gradlew assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: Melodock-Free-APK
-          path: android/app/build/outputs/apk/free/debug/*-free-debug.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Melodock-Pro-APK
-          path: android/app/build/outputs/apk/pro/debug/*-pro-debug.apk
+          name: Melodock-Pro-1.5-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

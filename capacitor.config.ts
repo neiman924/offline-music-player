@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Melodock',
   webDir: 'native-shell',
   loggingBehavior: 'none',
-  appendUserAgent: ' MelodockAndroid/1.3',
+  appendUserAgent: ' MelodockAndroid/1.5',
   backgroundColor: '#0e0d0c',
   android: {
     allowMixedContent: false,

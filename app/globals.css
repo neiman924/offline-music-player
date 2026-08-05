@@ -2429,7 +2429,8 @@ input[type='range']:hover::-webkit-slider-thumb {
   z-index: 3;
 }
 
-.immersive-record.playing img { animation: immersive-disc-spin 7s linear infinite; }
+.immersive-record.playing > img,
+.immersive-record.playing > .generated-track-art { animation: immersive-disc-spin 7s linear infinite; }
 
 @keyframes immersive-disc-spin { to { transform: rotate(360deg); } }
 

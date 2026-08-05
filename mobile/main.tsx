@@ -2,12 +2,9 @@ import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import MusicPlayer from '../app/MusicPlayer'
 import { requestPlaybackNotificationPermission } from '../app/playbackNative'
-import { getAppEdition, type AppEdition } from '../app/appEditionNative'
 import '../app/globals.css'
 
 function MobileApp() {
-  const [edition, setEdition] = React.useState<AppEdition>('free')
-  React.useEffect(() => { void getAppEdition().then(setEdition) }, [])
   const [showWelcome, setShowWelcome] = useState(() => localStorage.getItem('melodock-permissions-v1') !== 'done')
 
   const finish = async (requestNotifications: boolean) => {
@@ -18,7 +15,7 @@ function MobileApp() {
 
   return (
     <>
-      <MusicPlayer isPro={edition === 'pro'} />
+      <MusicPlayer isPro />
       {showWelcome && (
         <div role="dialog" aria-modal="true" aria-labelledby="permission-title" style={{position:'fixed',inset:0,zIndex:10000,display:'grid',placeItems:'center',padding:24,background:'rgba(0,0,0,.78)'}}>
           <section style={{maxWidth:520,padding:24,borderRadius:22,background:'#181614',color:'#fff',boxShadow:'0 24px 80px #000'}}>

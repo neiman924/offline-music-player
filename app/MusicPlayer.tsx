@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChangeEvent, CSSProperties, FormEvent, ReactNode } from 'react'
-import { clearPlaybackNotification, updatePlaybackNotification } from './playbackNative'
+import { clearPlaybackNotification, listenForPlaybackCommands, updatePlaybackNotification } from './playbackNative'
 import { isNativeAndroid, pickLocalAudioFiles, pickLocalMusicFolder, playableDocumentUrl, type LocalDocument } from './localFolderNative'
+import { lookupLyrics, lookupRadio } from './mobileServices'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -706,16 +707,9 @@ function lyricsTextFromPayload(payload: { found?: boolean; instrumental?: boolea
 }
 
 async function fetchLyricsForMood(track: Track, duration: number, signal: AbortSignal) {
-  const query = new URLSearchParams({
-    title: track.title,
-    artist: track.artist,
-    album: track.album,
-    duration: String(Math.round(duration || track.duration || 0)),
-  })
   try {
-    const response = await fetch(`/api/lyrics?${query}`, { signal })
-    if (!response.ok && response.status !== 404) return ''
-    return lyricsTextFromPayload(await response.json() as { found?: boolean; instrumental?: boolean; plainLyrics?: string | null; syncedLyrics?: string | null })
+    if (signal.aborted) return ''
+    return lyricsTextFromPayload(await lookupLyrics({ title: track.title, artist: track.artist, album: track.album, duration: Math.round(duration || track.duration || 0) }))
   } catch {
     return ''
   }
@@ -2560,9 +2554,8 @@ async function findRadioStations(zip: string) {
   const normalizedZip = zip.replace(/\D/g, '').slice(0, 5)
   if (!/^\d{5}$/.test(normalizedZip)) throw new Error('Enter a five-digit U.S. ZIP code.')
 
-  const response = await fetch(`/api/radio?zip=${encodeURIComponent(normalizedZip)}`)
-  const result = await response.json() as RadioSearchResult
-  if (!response.ok || !result.found) throw new Error(result.message || 'Local radio could not be loaded.')
+  const result = await lookupRadio(normalizedZip) as RadioSearchResult
+  if (!result.found) throw new Error(result.message || 'Local radio could not be loaded.')
   const location = result.location || normalizedZip
   return {
     zip: normalizedZip,
@@ -3002,16 +2995,10 @@ function NowPlayingView({
     lyricsRequestRef.current = controller
     setLyricsStatus('loading')
     setLyrics(null)
-    const query = new URLSearchParams({
-      title,
-      artist,
-      album,
-      duration: String(Math.round(durationHint || 0)),
-    })
-    fetch(`/api/lyrics?${query}`, { signal: controller.signal })
+    lookupLyrics({ title, artist, album, duration: Math.round(durationHint || 0) })
       .then(async response => {
-        const payload = await response.json() as LyricsResult
-        if (!response.ok && response.status !== 404) throw new Error(payload.message || 'Lyrics are temporarily unavailable.')
+        if (controller.signal.aborted) return
+        const payload = response as LyricsResult
         setLyrics(payload)
         setLyricsStatus(payload.found ? 'ready' : 'error')
         if (payload.found && offerMetadataUpdate && updateMetadataFromLyrics && payload.trackName && payload.artistName && track) {
@@ -3362,6 +3349,8 @@ function SettingsView({
   const analyzedMoodCount = localTracks.filter(track => track.mood && track.moodModelVersion === MOOD_MODEL_VERSION).length
   const retryMoodCount = localTracks.filter(track => track.moodModelVersion !== MOOD_MODEL_VERSION && track.moodAnalysisError).length
   const pendingMoodCount = Math.max(0, localTracks.length - analyzedMoodCount - retryMoodCount)
+  const linkedTrackCount = localTracks.filter(track => Boolean(track.documentUri)).length
+  const downloadedTrackCount = localTracks.length - linkedTrackCount
 
   function moveNav(index: number, direction: -1 | 1) {
     const nextIndex = index + direction
@@ -3430,6 +3419,13 @@ function SettingsView({
             <b>→</b>
             <span className={!settings.preferLocal ? 'active' : ''}>2 SYNOLOGY</span>
           </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="section-eyebrow">Storage</div>
+          <h2>Your music is not duplicated</h2>
+          <p><strong>{linkedTrackCount}</strong> tracks are linked from their original Android folders. Melodock stores only their read-only addresses and metadata.</p>
+          <p><strong>{downloadedTrackCount}</strong> tracks are private offline downloads created only through an explicit “Save offline” action.</p>
         </section>
 
         <section className="settings-panel settings-wide radio-settings-panel">
@@ -3830,13 +3826,13 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
   })
   const [localKeys, setLocalKeys] = useState<string[]>([])
   useEffect(() => {
-    if (localStorage.getItem('melodock:no-copy-migration-v1') === 'done') return
+    if (localStorage.getItem('melodock:no-copy-migration-v2') === 'done') return
     const copiedImports = tracksRef.current.filter(track => track.origin === 'local' && !track.documentUri)
     void Promise.all(copiedImports.map(async track => {
       const db = await openLocalAudioDb()
       await new Promise<void>(resolve => { const request = db.transaction(LOCAL_STORE_NAME, 'readwrite').objectStore(LOCAL_STORE_NAME).delete(trackLocalKey(track)); request.onsuccess = () => resolve(); request.onerror = () => resolve() })
     })).finally(() => {
-      const removed = new Set(copiedImports.map(trackLocalKey)); setTracks(items => items.filter(track => !removed.has(trackLocalKey(track)))); setLocalKeys(keys => keys.filter(key => !removed.has(key))); localStorage.setItem('melodock:no-copy-migration-v1', 'done')
+      const removed = new Set(copiedImports.map(trackLocalKey)); setTracks(items => items.filter(track => !removed.has(trackLocalKey(track)))); setLocalKeys(keys => keys.filter(key => !removed.has(key))); localStorage.setItem('melodock:no-copy-migration-v2', 'done')
     })
   }, [])
   const [requestedSource, setRequestedSource] = useState<PlaybackSource>('local')
@@ -4195,9 +4191,14 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
       try {
         const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
         if (!AudioContextCtor) throw new Error('This browser does not support local audio analysis.')
-        const record = await readLocalAudio(target)
+        const record = target.documentUri
+          ? { blob: await fetch(playableDocumentUrl(target.documentUri)).then(response => {
+              if (!response.ok) throw new Error('Android could not read the linked music file.')
+              return response.blob()
+            }) }
+          : await readLocalAudio(target)
         if (cancelled || moodJobRef.current.id !== jobId) return
-        if (!record) throw new Error('The offline audio copy is missing.')
+        if (!record) throw new Error('The linked music file is unavailable. Reconnect its folder in Local Music.')
         if (record.blob.size > deviceProfile.maxAudioBytes) {
           throw new Error(`This ${Math.ceil(record.blob.size / 1024 / 1024)} MB file is above the safe ${Math.round(deviceProfile.maxAudioBytes / 1024 / 1024)} MB limit for this ${deviceProfile.deviceClass}.`)
         }
@@ -4224,7 +4225,8 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
         }
         setTracks(items => items.map(item => trackLocalKey(item) === targetKey ? { ...item, ...analyzed } : item))
         setActiveTrack(current => current && trackLocalKey(current) === targetKey ? { ...current, ...analyzed } : current)
-        await saveLocalAudio({ ...target, ...analyzed }, record.blob)
+        // Persist only lightweight track metadata. Linked Android audio is never written to IndexedDB.
+        if (!target.documentUri) await saveLocalAudio({ ...target, ...analyzed }, record.blob)
         setMoodAnalysis({
           status: 'done',
           completed: 1,
@@ -4449,14 +4451,7 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
       try { mediaSession.setActionHandler(action, handler) } catch { /* Older Android versions support fewer actions. */ }
     }
 
-    // External Bluetooth/car "play" commands are intentionally ignored.
-    // Playback can only begin from a deliberate tap inside TuneStack.
-    safelySetHandler('play', () => {
-      if (!isPlaying) {
-        audioRef.current?.pause()
-        mediaSession.playbackState = 'paused'
-      }
-    })
+    safelySetHandler('play', () => setIsPlaying(true))
     safelySetHandler('pause', () => setIsPlaying(false))
     safelySetHandler('stop', () => setIsPlaying(false))
     safelySetHandler('nexttrack', next)
@@ -4472,6 +4467,17 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
         .forEach(action => safelySetHandler(action, null))
     }
   }, [activeTrack, duration, isPlaying, next, playbackStatus, prev, seek])
+
+  useEffect(() => {
+    let handle: { remove: () => Promise<void> } | null = null
+    void listenForPlaybackCommands(command => {
+      if (command === 'play') setIsPlaying(true)
+      else if (command === 'pause' || command === 'stop') setIsPlaying(false)
+      else if (command === 'next') next()
+      else if (command === 'previous') prev()
+    }).then(listener => { handle = listener })
+    return () => { void handle?.remove() }
+  }, [next, prev])
 
   useEffect(() => {
     if (!activeTrack) {
