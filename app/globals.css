@@ -2429,7 +2429,8 @@ input[type='range']:hover::-webkit-slider-thumb {
   z-index: 3;
 }
 
-.immersive-record.playing img { animation: immersive-disc-spin 7s linear infinite; }
+.immersive-record.playing > img,
+.immersive-record.playing > .generated-track-art { animation: immersive-disc-spin 7s linear infinite; }
 
 @keyframes immersive-disc-spin { to { transform: rotate(360deg); } }
 
@@ -3079,13 +3080,28 @@ input[type='range']:hover::-webkit-slider-thumb {
   margin-top: 22px;
 }
 
-.android-import-options label {
+.android-import-destination {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.android-import-destination label { display: grid; gap: 5px; color: var(--text-secondary); font-size: 11px; }
+.android-import-destination select,
+.android-import-destination input { min-width: 0; padding: 10px; color: var(--text-primary); background: var(--field-bg); border: 1px solid var(--hairline); border-radius: 10px; }
+
+.android-import-options label,
+.android-import-options > button {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 12px;
-  min-height: 68px;
-  padding: 10px 13px;
+  width: 100%;
+  min-height: 82px;
+  padding: 14px;
+  color: var(--text-primary);
+  text-align: left;
   background: var(--field-bg);
   border: 1px solid var(--hairline);
   border-radius: 18px;
@@ -3093,12 +3109,15 @@ input[type='range']:hover::-webkit-slider-thumb {
   touch-action: manipulation;
 }
 
+.android-import-options > button:disabled { cursor: wait; opacity: .58; }
+
 .android-option-icon {
   width: 46px;
   height: 46px;
 }
 
-.android-import-options label > span:nth-of-type(2) {
+.android-import-options label > span:nth-of-type(2),
+.android-import-options > button > span:nth-of-type(2) {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -3187,6 +3206,66 @@ input[type='range']:hover::-webkit-slider-thumb {
   border: 1px solid color-mix(in srgb, var(--player-accent) 40%, var(--hairline));
   border-radius: 15px;
   font-weight: 700;
+}
+
+.android-import-organize { display: grid; gap: 16px; margin-top: 20px; }
+
+.android-selection-summary {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--player-accent) 9%, var(--field-bg));
+  border: 1px solid color-mix(in srgb, var(--player-accent) 28%, var(--hairline));
+  border-radius: 17px;
+}
+.android-selection-summary strong,
+.android-selection-summary small { display: block; }
+.android-selection-summary strong { font-size: 14px; }
+.android-selection-summary small { margin-top: 3px; color: var(--text-secondary); font-size: 10px; }
+.android-selection-summary > button { padding: 8px 10px; color: var(--player-accent); background: transparent; border: 0; font-size: 11px; font-weight: 750; }
+
+.android-playlist-choice { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+.android-playlist-choice legend { margin-bottom: 8px; color: var(--text-primary); font-size: 15px; font-weight: 760; }
+.android-playlist-choice > label {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  padding: 10px 12px;
+  background: var(--field-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 15px;
+}
+.android-playlist-choice > label.selected { border-color: color-mix(in srgb, var(--player-accent) 62%, var(--hairline)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--player-accent) 10%, transparent); }
+.android-playlist-choice input[type="radio"] { width: 19px; height: 19px; margin: 0; accent-color: var(--player-accent); }
+.android-playlist-choice label strong,
+.android-playlist-choice label small { display: block; }
+.android-playlist-choice label strong { font-size: 13px; }
+.android-playlist-choice label small { margin-top: 3px; color: var(--text-secondary); font-size: 10px; line-height: 1.35; }
+.android-playlist-choice > select,
+.android-playlist-choice > input { min-width: 0; min-height: 44px; margin: 0 4px 2px 32px; padding: 10px 12px; color: var(--text-primary); background: var(--field-bg); border: 1px solid var(--hairline); border-radius: 12px; }
+
+.android-playlist-match { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; margin: 0 4px 2px 32px; padding: 10px; color: #66d97a; background: rgba(50, 215, 75, .07); border: 1px solid rgba(50, 215, 75, .2); border-radius: 12px; }
+.android-playlist-match strong,
+.android-playlist-match small { display: block; }
+.android-playlist-match strong { color: var(--text-primary); font-size: 11px; }
+.android-playlist-match small { margin-top: 3px; color: var(--text-secondary); font-size: 10px; line-height: 1.4; }
+
+.android-album-options { padding: 0 4px; color: var(--text-secondary); font-size: 11px; }
+.android-album-options summary { cursor: pointer; color: var(--text-secondary); font-weight: 700; }
+.android-album-options > div { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 10px; }
+.android-album-options label { display: grid; gap: 5px; }
+.android-album-options select,
+.android-album-options input { min-width: 0; padding: 10px; color: var(--text-primary); background: var(--field-bg); border: 1px solid var(--hairline); border-radius: 10px; }
+
+.android-import-confirm { width: 100%; min-height: 50px; padding: 12px 16px; color: #fff; background: var(--player-accent); border: 0; border-radius: 15px; font-size: 14px; font-weight: 780; box-shadow: 0 8px 24px color-mix(in srgb, var(--player-accent) 24%, transparent); }
+.android-import-confirm:disabled { cursor: not-allowed; opacity: .38; box-shadow: none; }
+
+@media (max-width: 520px) {
+  .android-album-options > div { grid-template-columns: 1fr; }
 }
 
 .background-analysis-card {

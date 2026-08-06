@@ -2,11 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChangeEvent, CSSProperties, FormEvent, ReactNode } from 'react'
-import {
-  getNativeShazamStatus,
-  identifyLocalAudioWithShazam,
-  type NativeShazamStatus,
-} from './shazamNative'
+import { clearPlaybackNotification, listenForPlaybackCommands, updatePlaybackNotification } from './playbackNative'
+import { isNativeAndroid, pickLocalAudioFiles, pickLocalMusicFolder, playableDocumentUrl, type LocalDocument } from './localFolderNative'
+import { lookupLyrics, lookupRadio } from './mobileServices'
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +22,7 @@ interface Track {
   sourcePath?: string
   origin?: 'local' | 'synology' | 'radio'
   localKey?: string
+  documentUri?: string
   radioUrl?: string
   radioHomepage?: string
   radioDistanceMiles?: number
@@ -38,19 +37,9 @@ interface Track {
   moodAnalysisError?: string
   moodModelVersion?: number
   moodLyricsUsed?: boolean
-  shazamStatus?: 'matched' | 'no-match'
-  shazamAttemptedAt?: string
-  shazamMatchedAt?: string
-  shazamId?: string
-  shazamIsrc?: string
-  shazamAppleMusicId?: string
-  shazamTitle?: string
-  shazamArtist?: string
-  shazamModelVersion?: number
-  shazamLastError?: string
   originalTitle?: string
   originalArtist?: string
-  metadataSource?: 'file' | 'filename' | 'shazam' | 'manual'
+  metadataSource?: 'file' | 'filename' | 'lyrics' | 'manual'
   embeddedMetadataChecked?: boolean
 }
 
@@ -89,7 +78,7 @@ interface PlayerSettings {
   lightColorMode: LightColorMode
   preferLocal: boolean
   autoAnalyzeLocal: boolean
-  autoIdentifyLocal: boolean
+  updateMetadataFromLyrics: boolean
   navOrder: NavView[]
 }
 
@@ -101,7 +90,7 @@ const DEFAULT_SETTINGS: PlayerSettings = {
   lightColorMode: 'random',
   preferLocal: true,
   autoAnalyzeLocal: false,
-  autoIdentifyLocal: true,
+  updateMetadataFromLyrics: false,
   navOrder: DEFAULT_NAV_ORDER,
 }
 
@@ -246,7 +235,6 @@ const LOCAL_DB_NAME = 'tunestack-local-audio'
 const LOCAL_STORE_NAME = 'tracks'
 const ARTWORK_STORE_NAME = 'artwork'
 const MOOD_MODEL_VERSION = 2
-const SHAZAM_MODEL_VERSION = 2
 
 interface LocalTrackRecord {
   key: string
@@ -364,11 +352,6 @@ type MoodAnalysisState = {
   completed: number
   total: number
   skipped: number
-  message: string
-}
-
-type ShazamIdentificationState = {
-  status: 'idle' | 'running' | 'matched' | 'no-match' | 'error'
   message: string
 }
 
@@ -724,16 +707,9 @@ function lyricsTextFromPayload(payload: { found?: boolean; instrumental?: boolea
 }
 
 async function fetchLyricsForMood(track: Track, duration: number, signal: AbortSignal) {
-  const query = new URLSearchParams({
-    title: track.title,
-    artist: track.artist,
-    album: track.album,
-    duration: String(Math.round(duration || track.duration || 0)),
-  })
   try {
-    const response = await fetch(`/api/lyrics?${query}`, { signal })
-    if (!response.ok && response.status !== 404) return ''
-    return lyricsTextFromPayload(await response.json() as { found?: boolean; instrumental?: boolean; plainLyrics?: string | null; syncedLyrics?: string | null })
+    if (signal.aborted) return ''
+    return lyricsTextFromPayload(await lookupLyrics({ title: track.title, artist: track.artist, album: track.album, duration: Math.round(duration || track.duration || 0) }))
   } catch {
     return ''
   }
@@ -2578,9 +2554,8 @@ async function findRadioStations(zip: string) {
   const normalizedZip = zip.replace(/\D/g, '').slice(0, 5)
   if (!/^\d{5}$/.test(normalizedZip)) throw new Error('Enter a five-digit U.S. ZIP code.')
 
-  const response = await fetch(`/api/radio?zip=${encodeURIComponent(normalizedZip)}`)
-  const result = await response.json() as RadioSearchResult
-  if (!response.ok || !result.found) throw new Error(result.message || 'Local radio could not be loaded.')
+  const result = await lookupRadio(normalizedZip) as RadioSearchResult
+  if (!result.found) throw new Error(result.message || 'Local radio could not be loaded.')
   const location = result.location || normalizedZip
   return {
     zip: normalizedZip,
@@ -2791,18 +2766,67 @@ type LocalImportState = {
 
 const EMPTY_LOCAL_IMPORT: LocalImportState = { status: 'idle', total: 0, completed: 0, imported: 0, skipped: 0, message: '' }
 
-function LocalImportSheet({ state, onFiles, onClose, onReset }: {
+type LocalImportOptions = { album: string; playlistId: string; newPlaylist: string }
+type LocalImportSelection =
+  | { kind: 'folder' | 'files'; documents: LocalDocument[]; files?: never }
+  | { kind: 'folder' | 'files'; files: File[]; documents?: never }
+
+function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, albums, playlists }: {
   state: LocalImportState
-  onFiles: (files: FileList | null) => void
+  onFiles: (files: File[] | null, options: LocalImportOptions) => void
+  onDocuments: (documents: LocalDocument[], options: LocalImportOptions) => void
   onClose: () => void
   onReset: () => void
+  albums: string[]
+  playlists: Playlist[]
 }) {
+  const [selection, setSelection] = useState<LocalImportSelection | null>(null)
+  const [picking, setPicking] = useState(false)
+  const [album, setAlbum] = useState('')
+  const [newAlbum, setNewAlbum] = useState('')
+  const [playlistChoice, setPlaylistChoice] = useState<'none' | 'existing' | 'new'>('none')
+  const [playlistId, setPlaylistId] = useState('')
+  const [newPlaylist, setNewPlaylist] = useState('')
   const busy = state.status === 'importing'
-  const pickFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = event.currentTarget.files
-    onFiles(files)
+  const matchingPlaylist = playlists.find(item => item.name.localeCompare(newPlaylist.trim(), undefined, { sensitivity: 'accent' }) === 0)
+  const selectedCount = selection?.documents?.length ?? selection?.files?.length ?? 0
+  const destination = (): LocalImportOptions => ({
+    album: newAlbum.trim() || album,
+    playlistId: playlistChoice === 'existing' ? playlistId : playlistChoice === 'new' && matchingPlaylist ? matchingPlaylist.id : '',
+    newPlaylist: playlistChoice === 'new' && !matchingPlaylist ? newPlaylist.trim() : '',
+  })
+  const pickNative = async (kind: 'files' | 'folder') => {
+    setPicking(true)
+    try {
+      const documents = kind === 'folder' ? await pickLocalMusicFolder() : await pickLocalAudioFiles()
+      if (documents.length) setSelection({ kind, documents })
+    } finally {
+      setPicking(false)
+    }
+  }
+  const pickFiles = (kind: 'files' | 'folder') => (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files || [])
+    if (files.length) setSelection({ kind, files })
     event.currentTarget.value = ''
   }
+  const importSelection = () => {
+    if (!selection) return
+    const options = destination()
+    if (selection.documents) onDocuments(selection.documents, options)
+    else onFiles(selection.files, options)
+  }
+  const resetFlow = () => {
+    setSelection(null)
+    setPlaylistChoice('none')
+    setPlaylistId('')
+    setNewPlaylist('')
+    setAlbum('')
+    setNewAlbum('')
+    onReset()
+  }
+  const canImport = Boolean(selection)
+    && (playlistChoice !== 'existing' || Boolean(playlistId))
+    && (playlistChoice !== 'new' || Boolean(newPlaylist.trim()))
 
   return (
     <div className="android-sheet-backdrop" role="presentation" onClick={() => { if (!busy) onClose() }}>
@@ -2812,7 +2836,7 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
           <span className="android-sheet-icon"><IconDownload size={22} /></span>
           <span>
             <h2 id="local-import-title">Add music from this device</h2>
-            <p>Choose individual songs or an entire music folder using Android’s file picker.</p>
+            <p>{selection ? 'Choose where the selected music should appear.' : 'Start with a folder or select individual audio files.'}</p>
           </span>
           <button className="android-sheet-close" type="button" onClick={onClose} disabled={busy} aria-label="Close music importer">×</button>
         </header>
@@ -2821,7 +2845,7 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
           <div className="android-import-progress" role="status">
             <div><span style={{ width: `${state.total ? (state.completed / state.total) * 100 : 0}%` }} /></div>
             <strong>Adding music… {state.completed} of {state.total}</strong>
-            <small>Keep TuneStack open until the import finishes.</small>
+            <small>Keep Melodock open until the links are added.</small>
           </div>
         )}
 
@@ -2832,32 +2856,36 @@ function LocalImportSheet({ state, onFiles, onClose, onReset }: {
           </div>
         )}
 
-        {!busy && (
+        {!busy && !selection && state.status !== 'done' && (
           <div className="android-import-options">
-            <label>
-              <input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles} />
-              <span className="android-option-icon"><IconMusic size={21} /></span>
-              <span><strong>Choose audio files</strong><small>Select one or several songs</small></span>
-              <b aria-hidden="true">›</b>
-            </label>
-            <label>
-              <input
-                type="file"
-                accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma"
-                multiple
-                hidden
-                ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }}
-                onChange={pickFiles}
-              />
-              <span className="android-option-icon"><IconFolder size={21} /></span>
-              <span><strong>Choose a music folder</strong><small>Import supported songs inside the selected folder</small></span>
-              <b aria-hidden="true">›</b>
-            </label>
+            {isNativeAndroid() ? (<>
+              <button type="button" disabled={picking} onClick={() => void pickNative('folder')}><span className="android-option-icon"><IconFolder size={26} /></span><span><strong>Choose Folder</strong><small>Link every supported song in one folder</small></span><b aria-hidden="true">›</b></button>
+              <button type="button" disabled={picking} onClick={() => void pickNative('files')}><span className="android-option-icon"><IconMusic size={26} /></span><span><strong>Choose Files</strong><small>Pick one or more individual songs</small></span><b aria-hidden="true">›</b></button>
+            </>) : (<>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }} onChange={pickFiles('folder')} /><span className="android-option-icon"><IconFolder size={26} /></span><span><strong>Choose Folder</strong><small>Select all supported songs inside it</small></span><b aria-hidden="true">›</b></label>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles('files')} /><span className="android-option-icon"><IconMusic size={26} /></span><span><strong>Choose Files</strong><small>Pick one or more individual songs</small></span><b aria-hidden="true">›</b></label>
+            </>)}
           </div>
         )}
 
-        <div className="android-import-note">Music is copied into TuneStack’s private offline storage. Your original files are not changed.</div>
-        {state.status === 'done' && <button className="android-import-more" type="button" onClick={onReset}>Add more music</button>}
+        {!busy && selection && state.status !== 'done' && (
+          <div className="android-import-organize">
+            <div className="android-selection-summary"><span className="android-option-icon">{selection.kind === 'folder' ? <IconFolder size={23} /> : <IconMusic size={23} />}</span><span><strong>{selectedCount} {selectedCount === 1 ? 'song' : 'songs'} selected</strong><small>{selection.kind === 'folder' ? 'Folder linked and ready' : 'Files linked and ready'}</small></span><button type="button" onClick={() => setSelection(null)}>Change</button></div>
+            <fieldset className="android-playlist-choice">
+              <legend>Add these songs to a playlist?</legend>
+              <label className={playlistChoice === 'existing' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'existing'} onChange={() => setPlaylistChoice('existing')} /><span><strong>Existing playlist</strong><small>Add songs without removing anything already there</small></span></label>
+              {playlistChoice === 'existing' && <select aria-label="Choose existing playlist" value={playlistId} onChange={event => setPlaylistId(event.target.value)}><option value="">Choose a playlist…</option>{playlists.map(item => <option key={item.id} value={item.id}>{item.name} ({item.trackIds.length})</option>)}</select>}
+              <label className={playlistChoice === 'new' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'new'} onChange={() => setPlaylistChoice('new')} /><span><strong>New playlist</strong><small>Create a playlist for these songs</small></span></label>
+              {playlistChoice === 'new' && <input aria-label="New playlist name" autoFocus value={newPlaylist} onChange={event => setNewPlaylist(event.target.value)} placeholder="Playlist name" />}
+              {playlistChoice === 'new' && matchingPlaylist && <div className="android-playlist-match"><IconCheck size={17} /><span><strong>“{matchingPlaylist.name}” already exists</strong><small>Melodock will add these songs to that playlist. It will not replace it.</small></span></div>}
+              <label className={playlistChoice === 'none' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'none'} onChange={() => setPlaylistChoice('none')} /><span><strong>No playlist</strong><small>Add songs only to Local Music</small></span></label>
+            </fieldset>
+            <details className="android-album-options"><summary>Album options</summary><div><label><span>Use existing album</span><select value={album} onChange={event => { setAlbum(event.target.value); setNewAlbum('') }}><option value="">Keep album information from each song</option>{albums.map(name => <option key={name} value={name}>{name}</option>)}</select></label><label><span>Or use a new album name</span><input value={newAlbum} onChange={event => { setNewAlbum(event.target.value); if (event.target.value) setAlbum('') }} placeholder="Optional album name" /></label></div></details>
+            <button className="android-import-confirm" type="button" disabled={!canImport} onClick={importSelection}>Add {selectedCount} {selectedCount === 1 ? 'song' : 'songs'}</button>
+          </div>
+        )}
+        <div className="android-import-note">{isNativeAndroid() ? 'No copies are created. Melodock stores read-only links and plays music directly from its original folder.' : 'Browser imports may use private browser storage. The Android app uses no-copy folder references.'}</div>
+        {state.status === 'done' && <button className="android-import-more" type="button" onClick={resetFlow}>Add more music</button>}
       </section>
     </div>
   )
@@ -2873,6 +2901,9 @@ type LyricsResult = {
   message?: string
   provider?: 'LRCLIB' | 'Lyrics.ovh'
   sourceUrl?: string
+  trackName?: string
+  artistName?: string
+  albumName?: string
 }
 
 type TimedLyricLine = { time: number; text: string }
@@ -2937,6 +2968,8 @@ function NowPlayingView({
   playbackError,
   lightColorMode,
   onSaveMetadata,
+  updateMetadataFromLyrics,
+  onApplyLyricsMetadata,
 }: {
   track: Track | null
   isPlaying: boolean
@@ -2967,6 +3000,8 @@ function NowPlayingView({
   playbackError: string
   lightColorMode: LightColorMode
   onSaveMetadata: (title: string, artist: string) => void
+  updateMetadataFromLyrics: boolean
+  onApplyLyricsMetadata: (metadata: Pick<Track, 'title' | 'artist' | 'album'>) => void
 }) {
   const [queueOpen, setQueueOpen] = useState(false)
   const [playlistOpen, setPlaylistOpen] = useState(false)
@@ -2999,31 +3034,34 @@ function NowPlayingView({
     if (ownsHistoryEntry && window.history.state?.tunestackOverlay === 'lyrics') window.history.back()
   }, [])
 
-  const runLyricsLookup = useCallback((title: string, artist: string, album: string, durationHint: number) => {
+  const runLyricsLookup = useCallback((title: string, artist: string, album: string, durationHint: number, offerMetadataUpdate = false) => {
     lyricsRequestRef.current?.abort()
     const controller = new AbortController()
     lyricsRequestRef.current = controller
     setLyricsStatus('loading')
     setLyrics(null)
-    const query = new URLSearchParams({
-      title,
-      artist,
-      album,
-      duration: String(Math.round(durationHint || 0)),
-    })
-    fetch(`/api/lyrics?${query}`, { signal: controller.signal })
+    lookupLyrics({ title, artist, album, duration: Math.round(durationHint || 0) })
       .then(async response => {
-        const payload = await response.json() as LyricsResult
-        if (!response.ok && response.status !== 404) throw new Error(payload.message || 'Lyrics are temporarily unavailable.')
+        if (controller.signal.aborted) return
+        const payload = response as LyricsResult
         setLyrics(payload)
         setLyricsStatus(payload.found ? 'ready' : 'error')
+        if (payload.found && offerMetadataUpdate && updateMetadataFromLyrics && payload.trackName && payload.artistName && track) {
+          const nextMetadata = {
+            title: payload.trackName,
+            artist: payload.artistName,
+            album: payload.albumName || track.album,
+          }
+          const details = [nextMetadata.title, nextMetadata.artist, nextMetadata.album].filter(Boolean).join(' · ')
+          if (window.confirm(`Lyrics matched ${details}. Update this song’s title, artist, and album? Existing artwork will be kept.`)) onApplyLyricsMetadata(nextMetadata)
+        }
       })
       .catch(cause => {
         if (cause instanceof Error && cause.name === 'AbortError') return
         setLyrics({ found: false, message: cause instanceof Error ? cause.message : 'Lyrics are temporarily unavailable.' })
         setLyricsStatus('error')
       })
-  }, [])
+  }, [onApplyLyricsMetadata, track, updateMetadataFromLyrics])
 
   useEffect(() => {
     closeLyrics()
@@ -3060,9 +3098,8 @@ function NowPlayingView({
       }, 0)
       return () => window.clearTimeout(timer)
     }
-    const useShazamMetadata = track.metadataSource === 'shazam'
-    const title = useShazamMetadata ? track.shazamTitle?.trim() || track.title : track.title
-    const artist = lyricsSearchArtist(useShazamMetadata ? track.shazamArtist?.trim() || track.artist : track.artist)
+    const title = track.title
+    const artist = lyricsSearchArtist(track.artist)
     const album = track.album
     const durationHint = track.duration || 0
     const timer = window.setTimeout(() => {
@@ -3280,7 +3317,7 @@ function NowPlayingView({
             const title = lyricsTitle.trim()
             const artist = lyricsArtist.trim()
             onSaveMetadata(title, artist)
-            runLyricsLookup(title, artist, track.album, duration || track.duration || 0)
+            runLyricsLookup(title, artist, track.album, duration || track.duration || 0, true)
           }}>
             <label>Title<input value={lyricsTitle} onChange={event => setLyricsTitle(event.target.value)} /></label>
             <label>Artist<input value={lyricsArtist} onChange={event => setLyricsArtist(event.target.value)} /></label>
@@ -3301,7 +3338,7 @@ function NowPlayingView({
           </div>
           <footer>
             {lyrics?.provider === 'Lyrics.ovh' ? <>Lyrics provided by <a href="https://lyricsovh.docs.apiary.io/" target="_blank" rel="noreferrer">Lyrics.ovh</a></> : <>Lyrics provided by <a href="https://lrclib.net" target="_blank" rel="noreferrer">LRCLIB</a></>}
-            <span>Shazam matches update these fields automatically. Manual corrections are saved when you search again.</span>
+            <span>{updateMetadataFromLyrics ? 'A reliable manual lyrics search can offer metadata updates while keeping existing artwork.' : 'Metadata updates from lyrics matches are off in Settings.'}</span>
           </footer>
         </section>
       )}
@@ -3325,6 +3362,7 @@ const NAV_LABELS: Record<NavView, string> = {
 
 function SettingsView({
   settings,
+  isPro,
   onChange,
   devices,
   onAddSource,
@@ -3333,14 +3371,13 @@ function SettingsView({
   localTracks,
   deviceProfile,
   moodAnalysis,
-  shazamStatus,
-  shazamIdentification,
   radioZip,
   radioLocation,
   radioStationCount,
   onRadioSearchResults,
 }: {
   settings: PlayerSettings
+  isPro: boolean
   onChange: (settings: PlayerSettings) => void
   devices: NasDevice[]
   onAddSource: (device: NasDevice, tracks: Track[]) => void
@@ -3349,8 +3386,6 @@ function SettingsView({
   localTracks: Track[]
   deviceProfile: DeviceProfile
   moodAnalysis: MoodAnalysisState
-  shazamStatus: NativeShazamStatus
-  shazamIdentification: ShazamIdentificationState
   radioZip: string
   radioLocation: string
   radioStationCount: number
@@ -3359,9 +3394,8 @@ function SettingsView({
   const analyzedMoodCount = localTracks.filter(track => track.mood && track.moodModelVersion === MOOD_MODEL_VERSION).length
   const retryMoodCount = localTracks.filter(track => track.moodModelVersion !== MOOD_MODEL_VERSION && track.moodAnalysisError).length
   const pendingMoodCount = Math.max(0, localTracks.length - analyzedMoodCount - retryMoodCount)
-  const shazamMatchedCount = localTracks.filter(track => track.shazamStatus === 'matched').length
-  const shazamNoMatchCount = localTracks.filter(track => track.shazamStatus === 'no-match').length
-  const shazamPendingCount = Math.max(0, localTracks.length - shazamMatchedCount - shazamNoMatchCount)
+  const linkedTrackCount = localTracks.filter(track => Boolean(track.documentUri)).length
+  const downloadedTrackCount = localTracks.length - linkedTrackCount
 
   function moveNav(index: number, direction: -1 | 1) {
     const nextIndex = index + direction
@@ -3382,13 +3416,13 @@ function SettingsView({
 
       <div className="settings-grid">
         <section className="settings-panel">
-          <div className="section-eyebrow">Appearance</div>
+          <div className="section-eyebrow">Appearance · Pro</div>
           <h2>Theme</h2>
           <div className="setting-choice-grid">
             <button className={settings.theme === 'apple-dark' ? 'selected' : ''} onClick={() => onChange({ ...settings, theme: 'apple-dark' })}>
               <strong>Midnight</strong><span>Deep charcoal surfaces with vibrant artwork and controls</span>
             </button>
-            <button className={settings.theme === 'apple-light' ? 'selected' : ''} onClick={() => onChange({ ...settings, theme: 'apple-light' })}>
+            <button className={settings.theme === 'apple-light' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, theme: 'apple-light' })}>
               <strong>Daylight</strong><span>Bright, airy surfaces inspired by a native music library</span>
             </button>
           </div>
@@ -3396,7 +3430,7 @@ function SettingsView({
           <h2>Display color</h2>
           <div className="accent-choices">
             {(['pink', 'red', 'orange', 'purple', 'blue', 'teal', 'green'] as const).map(accent => (
-              <button key={accent} className={`${accent} ${settings.accent === accent ? 'selected' : ''}`} onClick={() => onChange({ ...settings, accent })}>{accent}</button>
+              <button key={accent} className={`${accent} ${settings.accent === accent ? 'selected' : ''}`} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, accent })}>{accent}</button>
             ))}
           </div>
 
@@ -3405,14 +3439,14 @@ function SettingsView({
             <button className={settings.lightColorMode === 'random' ? 'selected' : ''} onClick={() => onChange({ ...settings, lightColorMode: 'random' })}>
               <strong>Random for every song</strong><span>A fresh three-color combination based on the current track</span>
             </button>
-            <button className={settings.lightColorMode === 'artwork' ? 'selected' : ''} onClick={() => onChange({ ...settings, lightColorMode: 'artwork' })}>
+            <button className={settings.lightColorMode === 'artwork' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, lightColorMode: 'artwork' })}>
               <strong>Use album artwork</strong><span>Build the moving lights from the colors in the current cover</span>
             </button>
           </div>
 
           <h2>Density</h2>
           <div className="inline-setting">
-            <button className={settings.density === 'compact' ? 'selected' : ''} onClick={() => onChange({ ...settings, density: 'compact' })}>Compact</button>
+            <button className={settings.density === 'compact' ? 'selected' : ''} disabled={!isPro} onClick={() => isPro && onChange({ ...settings, density: 'compact' })}>Compact</button>
             <button className={settings.density === 'comfortable' ? 'selected' : ''} onClick={() => onChange({ ...settings, density: 'comfortable' })}>Comfortable</button>
           </div>
         </section>
@@ -3430,6 +3464,13 @@ function SettingsView({
             <b>→</b>
             <span className={!settings.preferLocal ? 'active' : ''}>2 SYNOLOGY</span>
           </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="section-eyebrow">Storage</div>
+          <h2>Your music is not duplicated</h2>
+          <p><strong>{linkedTrackCount}</strong> tracks are linked from their original Android folders. Melodock stores only their read-only addresses and metadata.</p>
+          <p><strong>{downloadedTrackCount}</strong> tracks are private offline downloads created only through an explicit “Save offline” action.</p>
         </section>
 
         <section className="settings-panel settings-wide radio-settings-panel">
@@ -3475,7 +3516,7 @@ function SettingsView({
             </span>
           </div>
           <label className={`background-analysis-card ${settings.autoAnalyzeLocal ? 'enabled' : ''}`}>
-            <input className="background-analysis-input" type="checkbox" checked={settings.autoAnalyzeLocal} onChange={event => onChange({ ...settings, autoAnalyzeLocal: event.target.checked })} />
+            <input className="background-analysis-input" type="checkbox" disabled={!isPro} checked={isPro && settings.autoAnalyzeLocal} onChange={event => isPro && onChange({ ...settings, autoAnalyzeLocal: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
             <span className="background-analysis-copy">
               <strong>Background mood analysis</strong>
@@ -3501,46 +3542,16 @@ function SettingsView({
           </div>
         </section>
 
-        <section className="settings-panel shazam-panel">
-          <div className="section-eyebrow">Native Android</div>
-          <h2>Identify local music with Shazam</h2>
-          <label className={`background-analysis-card ${settings.autoIdentifyLocal && shazamStatus.available ? 'enabled' : ''} ${!shazamStatus.available ? 'unavailable' : ''}`}>
-            <input
-              className="background-analysis-input"
-              type="checkbox"
-              checked={settings.autoIdentifyLocal}
-              disabled={!shazamStatus.available}
-              onChange={event => onChange({ ...settings, autoIdentifyLocal: event.target.checked })}
-            />
+        <section className="settings-panel lyrics-metadata-panel">
+          <div className="section-eyebrow">Lyrics &amp; metadata</div>
+          <h2>Offer metadata updates after a lyrics search</h2>
+          <label className={`background-analysis-card ${settings.updateMetadataFromLyrics ? 'enabled' : ''}`}>
+            <input className="background-analysis-input" type="checkbox" disabled={!isPro} checked={isPro && settings.updateMetadataFromLyrics} onChange={event => isPro && onChange({ ...settings, updateMetadataFromLyrics: event.target.checked })} />
             <span className="background-analysis-icon"><IconMusic size={24} /></span>
-            <span className="background-analysis-copy">
-              <strong>Automatic Shazam identification</strong>
-              <small>
-                {shazamStatus.available
-                  ? 'Identify each local song once while it plays, save the corrected title and artist, then permanently skip it.'
-                  : shazamStatus.message || 'Install the native Android APK to enable ShazamKit.'}
-              </small>
-            </span>
+            <span className="background-analysis-copy"><strong>Metadata suggestions</strong><small>After you manually search for lyrics and a reliable match is found, ask before updating title, artist, and album. Existing artwork is always kept.</small></span>
             <span className="android-switch" aria-hidden="true"><i /></span>
           </label>
-          <p>The original title and artist are retained for undo. Local audio is converted to a non-reversible Shazam signature before matching.</p>
-          <div className="mood-summary">
-            <strong>{shazamMatchedCount}</strong>
-            <span>matched · {shazamNoMatchCount} checked with no match · {shazamPendingCount} remaining</span>
-          </div>
-          {shazamIdentification.message && (
-            <div className={`mood-message ${shazamIdentification.status === 'matched' ? 'done' : shazamIdentification.status}`}>
-              {shazamIdentification.message}
-            </div>
-          )}
-          <div className={`auto-analysis-state ${settings.autoIdentifyLocal && shazamStatus.available ? 'enabled' : ''}`}>
-            <span aria-hidden="true" />
-            {!shazamStatus.available
-              ? 'Waiting for the configured Android APK'
-              : settings.autoIdentifyLocal
-                ? 'One-time Shazam identification is enabled'
-                : 'Automatic Shazam identification is off'}
-          </div>
+          <p>This never runs or asks just because a song starts playing. It is off by default and always requires your approval.</p>
         </section>
 
         <section className="settings-panel settings-wide source-settings-panel">
@@ -3823,7 +3834,7 @@ function PlayerBar({
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
-export default function App() {
+export default function App({ isPro = false }: { isPro?: boolean }) {
   const deviceProfile = useDeviceProfile()
   const [tracks, setTracks] = useState<Track[]>(() => readStored<Track[]>('tunestack:v2:tracks', []).map(track => ({ ...track, title: cleanTrackTitle(track.title || track.sourcePath || 'Unknown track') })))
   const [radioZip, setRadioZip] = useState(() => readStored<string>('tunestack:v1:radio-zip', ''))
@@ -3859,6 +3870,16 @@ export default function App() {
     return { ...DEFAULT_SETTINGS, ...stored, theme, accent, lightColorMode, navOrder }
   })
   const [localKeys, setLocalKeys] = useState<string[]>([])
+  useEffect(() => {
+    if (localStorage.getItem('melodock:no-copy-migration-v2') === 'done') return
+    const copiedImports = tracksRef.current.filter(track => track.origin === 'local' && !track.documentUri)
+    void Promise.all(copiedImports.map(async track => {
+      const db = await openLocalAudioDb()
+      await new Promise<void>(resolve => { const request = db.transaction(LOCAL_STORE_NAME, 'readwrite').objectStore(LOCAL_STORE_NAME).delete(trackLocalKey(track)); request.onsuccess = () => resolve(); request.onerror = () => resolve() })
+    })).finally(() => {
+      const removed = new Set(copiedImports.map(trackLocalKey)); setTracks(items => items.filter(track => !removed.has(trackLocalKey(track)))); setLocalKeys(keys => keys.filter(key => !removed.has(key))); localStorage.setItem('melodock:no-copy-migration-v2', 'done')
+    })
+  }, [])
   const [requestedSource, setRequestedSource] = useState<PlaybackSource>('local')
   const [activeSource, setActiveSource] = useState<PlaybackSource | null>(null)
   const [audioUrl, setAudioUrl] = useState('')
@@ -3866,13 +3887,6 @@ export default function App() {
   const [playbackError, setPlaybackError] = useState('')
   const [downloadState, setDownloadState] = useState<DownloadState>('idle')
   const [moodAnalysis, setMoodAnalysis] = useState<MoodAnalysisState>({ status: 'idle', completed: 0, total: 0, skipped: 0, message: '' })
-  const [shazamStatus, setShazamStatus] = useState<NativeShazamStatus>({
-    available: false,
-    configured: false,
-    platform: 'web',
-    message: 'Checking native ShazamKit…',
-  })
-  const [shazamIdentification, setShazamIdentification] = useState<ShazamIdentificationState>({ status: 'idle', message: '' })
   const [showLocalImport, setShowLocalImport] = useState(false)
   const [localImportState, setLocalImportState] = useState<LocalImportState>(EMPTY_LOCAL_IMPORT)
   const [progress, setProgress] = useState(0)
@@ -3881,7 +3895,6 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const objectUrlRef = useRef('')
   const moodJobRef = useRef<{ id: number; context: AudioContext | null }>({ id: 0, context: null })
-  const shazamJobRef = useRef(0)
   const tracksRef = useRef(tracks)
   const radioTracksRef = useRef(radioTracks)
   const artworkObjectUrlsRef = useRef<Map<string, string>>(new Map())
@@ -3967,13 +3980,6 @@ export default function App() {
     return () => { cancelled = true }
   }, [])
   useEffect(() => {
-    let cancelled = false
-    getNativeShazamStatus().then(status => {
-      if (!cancelled) setShazamStatus(status)
-    })
-    return () => { cancelled = true }
-  }, [])
-  useEffect(() => {
     if (!devices.length) return
     let cancelled = false
     const savedDevices = [...devices]
@@ -4005,8 +4011,8 @@ export default function App() {
   }, [devices, tracks])
 
   const playingFromDevice = activeTrack?.sourceId ? devices.find(device => device.id === activeTrack.sourceId) ?? null : null
-  const localAvailable = activeTrack ? localKeys.includes(trackLocalKey(activeTrack)) : false
-  const localTracks = tracks.filter(track => track.origin === 'local' || localKeys.includes(trackLocalKey(track)))
+  const localAvailable = activeTrack ? Boolean(activeTrack.documentUri) || localKeys.includes(trackLocalKey(activeTrack)) : false
+  const localTracks = tracks.filter(track => track.origin === 'local' || Boolean(track.documentUri) || localKeys.includes(trackLocalKey(track)))
   const synologyTracks = tracks.filter(track => track.origin !== 'local' && track.origin !== 'radio' && Boolean(track.sourceId) && track.sourceId !== 'local-device')
   const activeTrackKey = activeTrack ? trackLocalKey(activeTrack) : ''
   const devicePlaybackKey = playingFromDevice
@@ -4037,7 +4043,7 @@ export default function App() {
 
   const cacheEmbeddedMetadata = useCallback(async (track: Track, audioBlob: Blob) => {
     const key = trackLocalKey(track)
-    if (track.embeddedMetadataChecked || track.metadataSource === 'shazam' || track.metadataSource === 'manual' || metadataJobsRef.current.has(key)) return
+    if (track.embeddedMetadataChecked || track.metadataSource === 'lyrics' || track.metadataSource === 'manual' || metadataJobsRef.current.has(key)) return
     metadataJobsRef.current.add(key)
     try {
       const embedded = await extractEmbeddedTrackMetadata(audioBlob)
@@ -4129,6 +4135,10 @@ export default function App() {
           return
         }
 
+        if (selectedTrack.documentUri && requestedSource !== 'synology') {
+          if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = '' }
+          setActiveSource('local'); setAudioUrl(playableDocumentUrl(selectedTrack.documentUri)); setPlaybackStatus('ready'); return
+        }
         const localRecord = await readLocalAudio(selectedTrack)
         let source: PlaybackSource
         let blob: Blob
@@ -4202,7 +4212,7 @@ export default function App() {
     let startTimer = 0
     const lyricsController = new AbortController()
 
-    const shouldAnalyze = settings.autoAnalyzeLocal
+    const shouldAnalyze = isPro && settings.autoAnalyzeLocal
       && Boolean(activeTrack)
       && activeTrack?.moodModelVersion !== MOOD_MODEL_VERSION
       && isPlaying
@@ -4226,9 +4236,14 @@ export default function App() {
       try {
         const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
         if (!AudioContextCtor) throw new Error('This browser does not support local audio analysis.')
-        const record = await readLocalAudio(target)
+        const record = target.documentUri
+          ? { blob: await fetch(playableDocumentUrl(target.documentUri)).then(response => {
+              if (!response.ok) throw new Error('Android could not read the linked music file.')
+              return response.blob()
+            }) }
+          : await readLocalAudio(target)
         if (cancelled || moodJobRef.current.id !== jobId) return
-        if (!record) throw new Error('The offline audio copy is missing.')
+        if (!record) throw new Error('The linked music file is unavailable. Reconnect its folder in Local Music.')
         if (record.blob.size > deviceProfile.maxAudioBytes) {
           throw new Error(`This ${Math.ceil(record.blob.size / 1024 / 1024)} MB file is above the safe ${Math.round(deviceProfile.maxAudioBytes / 1024 / 1024)} MB limit for this ${deviceProfile.deviceClass}.`)
         }
@@ -4255,7 +4270,8 @@ export default function App() {
         }
         setTracks(items => items.map(item => trackLocalKey(item) === targetKey ? { ...item, ...analyzed } : item))
         setActiveTrack(current => current && trackLocalKey(current) === targetKey ? { ...current, ...analyzed } : current)
-        await saveLocalAudio({ ...target, ...analyzed }, record.blob)
+        // Persist only lightweight track metadata. Linked Android audio is never written to IndexedDB.
+        if (!target.documentUri) await saveLocalAudio({ ...target, ...analyzed }, record.blob)
         setMoodAnalysis({
           status: 'done',
           completed: 1,
@@ -4284,131 +4300,8 @@ export default function App() {
         moodJobRef.current = { id: jobId, context: null }
       }
     }
-  }, [activeSource, activeTrack, deviceProfile.deviceClass, deviceProfile.maxAudioBytes, deviceProfile.maxAudioSeconds, isPlaying, localAvailable, playbackStatus, settings.autoAnalyzeLocal])
+  }, [activeSource, activeTrack, deviceProfile.deviceClass, deviceProfile.maxAudioBytes, deviceProfile.maxAudioSeconds, isPlaying, isPro, localAvailable, playbackStatus, settings.autoAnalyzeLocal])
 
-  useEffect(() => {
-    const jobId = shazamJobRef.current + 1
-    shazamJobRef.current = jobId
-    let cancelled = false
-    let startTimer = 0
-
-    const currentShazamResult = activeTrack?.shazamModelVersion === SHAZAM_MODEL_VERSION
-      && (
-        (activeTrack.shazamStatus === 'matched' && Boolean(activeTrack.shazamTitle || activeTrack.shazamArtist))
-        || activeTrack.shazamStatus === 'no-match'
-      )
-    const shouldIdentify = settings.autoIdentifyLocal
-      && shazamStatus.available
-      && Boolean(activeTrack)
-      && !currentShazamResult
-      && isPlaying
-      && activeSource === 'local'
-      && localAvailable
-      && playbackStatus === 'ready'
-
-    if (!shouldIdentify || !activeTrack) {
-      queueMicrotask(() => {
-        setShazamIdentification(current => current.status === 'running' ? { status: 'idle', message: '' } : current)
-      })
-      return () => { cancelled = true }
-    }
-
-    const targetKey = activeTrackKey
-    const target = tracksRef.current.find(item => trackLocalKey(item) === targetKey) || activeTrack
-    queueMicrotask(() => {
-      if (!cancelled && shazamJobRef.current === jobId) {
-        setShazamIdentification({ status: 'running', message: `Identifying “${target.title}” with Shazam…` })
-      }
-    })
-
-    const identifyTrack = async () => {
-      try {
-        const record = await readLocalAudio(target)
-        if (cancelled || shazamJobRef.current !== jobId) return
-        if (!record) throw new Error('The local audio copy is missing.')
-
-        const result = await identifyLocalAudioWithShazam(record.blob)
-        if (cancelled || shazamJobRef.current !== jobId) return
-
-        const attemptedAt = new Date().toISOString()
-        const matchedTitle = result.title?.trim()
-        const matchedArtist = result.artist?.trim()
-        const hasUsefulMetadata = result.status === 'matched' && Boolean(matchedTitle || matchedArtist)
-        const metadataPatch: Partial<Track> = hasUsefulMetadata
-          ? {
-              title: matchedTitle || target.title,
-              artist: matchedArtist || target.artist,
-              cover: result.artworkUrl?.trim() || target.cover,
-              originalTitle: target.originalTitle || target.title,
-              originalArtist: target.originalArtist || target.artist,
-              metadataSource: 'shazam',
-              shazamTitle: matchedTitle,
-              shazamArtist: matchedArtist,
-              shazamStatus: 'matched',
-              shazamModelVersion: SHAZAM_MODEL_VERSION,
-              shazamAttemptedAt: attemptedAt,
-              shazamMatchedAt: attemptedAt,
-              shazamId: result.shazamId,
-              shazamIsrc: result.isrc,
-              shazamAppleMusicId: result.appleMusicId,
-              shazamLastError: undefined,
-            }
-          : {
-              shazamStatus: 'no-match',
-              shazamModelVersion: SHAZAM_MODEL_VERSION,
-              shazamAttemptedAt: attemptedAt,
-              shazamLastError: undefined,
-            }
-        const newestTrack = tracksRef.current.find(item => trackLocalKey(item) === targetKey) || target
-        const updatedTrack: Track = { ...newestTrack, ...metadataPatch }
-
-        setTracks(items => items.map(item => trackLocalKey(item) === targetKey ? { ...item, ...metadataPatch } : item))
-        setActiveTrack(current => current && trackLocalKey(current) === targetKey ? { ...current, ...metadataPatch } : current)
-        await saveLocalAudio(updatedTrack, record.blob)
-
-        if (hasUsefulMetadata) {
-          setShazamIdentification({
-            status: 'matched',
-            message: `Saved as “${updatedTrack.title}” by ${updatedTrack.artist}. This track is permanently marked as identified.`,
-          })
-        } else {
-          setShazamIdentification({
-            status: 'no-match',
-            message: `No Shazam match was found for “${target.title}”. It is marked as checked and will not run again automatically.`,
-          })
-        }
-      } catch (cause) {
-        if (cancelled || shazamJobRef.current !== jobId) return
-        const reason = (cause instanceof Error ? cause.message : 'Shazam identification failed.').slice(0, 180)
-        const attemptedAt = new Date().toISOString()
-        setTracks(items => items.map(item => trackLocalKey(item) === targetKey
-          ? { ...item, shazamAttemptedAt: attemptedAt, shazamLastError: reason }
-          : item))
-        setShazamIdentification({
-          status: 'error',
-          message: `Could not identify “${target.title}”. ${reason} It will retry on a future play.`,
-        })
-      }
-    }
-
-    startTimer = window.setTimeout(identifyTrack, 1200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(startTimer)
-    }
-  }, [
-    activeSource,
-    activeTrack?.shazamArtist,
-    activeTrack?.shazamModelVersion,
-    activeTrack?.shazamStatus,
-    activeTrack?.shazamTitle,
-    activeTrackKey,
-    isPlaying,
-    localAvailable,
-    playbackStatus,
-    settings.autoIdentifyLocal,
-    shazamStatus.available,
-  ])
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
@@ -4423,6 +4316,19 @@ export default function App() {
       artist: artist.trim(),
       metadataSource: 'manual',
     }
+    setTracks(items => items.map(item => trackLocalKey(item) === activeTrackKey ? { ...item, ...metadataPatch } : item))
+    setActiveTrack(current => current && trackLocalKey(current) === activeTrackKey ? { ...current, ...metadataPatch } : current)
+    void (async () => {
+      const latestTrack = tracksRef.current.find(item => trackLocalKey(item) === activeTrackKey)
+      if (!latestTrack) return
+      const record = await readLocalAudio(latestTrack)
+      if (record) await saveLocalAudio({ ...latestTrack, ...metadataPatch }, record.blob)
+    })().catch(() => undefined)
+  }, [activeTrackKey])
+
+  const applyLyricsMetadata = useCallback((metadata: Pick<Track, 'title' | 'artist' | 'album'>) => {
+    if (!activeTrackKey) return
+    const metadataPatch: Partial<Track> = { ...metadata, metadataSource: 'lyrics' }
     setTracks(items => items.map(item => trackLocalKey(item) === activeTrackKey ? { ...item, ...metadataPatch } : item))
     setActiveTrack(current => current && trackLocalKey(current) === activeTrackKey ? { ...current, ...metadataPatch } : current)
     void (async () => {
@@ -4590,14 +4496,7 @@ export default function App() {
       try { mediaSession.setActionHandler(action, handler) } catch { /* Older Android versions support fewer actions. */ }
     }
 
-    // External Bluetooth/car "play" commands are intentionally ignored.
-    // Playback can only begin from a deliberate tap inside TuneStack.
-    safelySetHandler('play', () => {
-      if (!isPlaying) {
-        audioRef.current?.pause()
-        mediaSession.playbackState = 'paused'
-      }
-    })
+    safelySetHandler('play', () => setIsPlaying(true))
     safelySetHandler('pause', () => setIsPlaying(false))
     safelySetHandler('stop', () => setIsPlaying(false))
     safelySetHandler('nexttrack', next)
@@ -4613,6 +4512,30 @@ export default function App() {
         .forEach(action => safelySetHandler(action, null))
     }
   }, [activeTrack, duration, isPlaying, next, playbackStatus, prev, seek])
+
+  useEffect(() => {
+    let handle: { remove: () => Promise<void> } | null = null
+    void listenForPlaybackCommands(command => {
+      if (command === 'play') setIsPlaying(true)
+      else if (command === 'pause' || command === 'stop') setIsPlaying(false)
+      else if (command === 'next') next()
+      else if (command === 'previous') prev()
+    }).then(listener => { handle = listener })
+    return () => { void handle?.remove() }
+  }, [next, prev])
+
+  useEffect(() => {
+    if (!activeTrack) {
+      void clearPlaybackNotification()
+      return
+    }
+    void updatePlaybackNotification({
+      title: activeTrack.title,
+      artist: activeTrack.artist,
+      album: activeTrack.album,
+      playing: isPlaying && playbackStatus !== 'error',
+    })
+  }, [activeTrack, isPlaying, playbackStatus])
 
   useEffect(() => {
     if (!('mediaSession' in navigator) || !activeTrack || !Number.isFinite(duration) || duration <= 0) return
@@ -4649,7 +4572,20 @@ export default function App() {
     }
   }, [activeTrack, playingFromDevice])
 
-  const importLocalFiles = useCallback(async (files: FileList | null) => {
+  const importLocalDocuments = useCallback((documents: LocalDocument[], options: LocalImportOptions) => {
+    if (!documents.length) return
+    const imported = documents.map((document): Track => {
+      const key = `document:${document.uri}`
+      return { id: stableNumericId(key), title: document.title || cleanTrackTitle(document.name), artist: document.artist || 'Unknown artist', album: options.album || document.album || document.folderName || 'Local music', duration: Math.max(0, Math.round((document.durationMs || 0) / 1000)), year: document.year || 0, genre: document.genre || 'Local', cover: '/icon-512.png', sourceId: 'local-device', sourcePath: document.relativePath || document.name, origin: 'local', localKey: key, documentUri: document.uri, metadataSource: document.title || document.artist ? 'file' : 'filename', embeddedMetadataChecked: true }
+    })
+    setTracks(items => [...items.filter(item => !imported.some(track => track.localKey === item.localKey)), ...imported])
+    const importedIds = imported.map(track => track.id)
+    if (options.newPlaylist) { const playlist: Playlist = { id: `${Date.now()}`, name: options.newPlaylist, trackIds: importedIds }; setPlaylists(items => [...items, playlist]); setSelectedPlaylistId(playlist.id) }
+    else if (options.playlistId) setPlaylists(items => items.map(item => item.id === options.playlistId ? { ...item, trackIds: Array.from(new Set([...item.trackIds, ...importedIds])) } : item))
+    setLocalImportState({ status: 'done', total: documents.length, completed: documents.length, imported: documents.length, skipped: 0, message: `${documents.length} ${documents.length === 1 ? 'song' : 'songs'} linked without copying.` })
+  }, [])
+
+  const importLocalFiles = useCallback(async (files: File[] | FileList | null, options: LocalImportOptions) => {
     if (!files?.length) return
     const selectedFiles = Array.from(files)
     setLocalImportState({ status: 'importing', total: selectedFiles.length, completed: 0, imported: 0, skipped: 0, message: '' })
@@ -4680,7 +4616,7 @@ export default function App() {
         id: stableTrackId(key),
         title,
         artist: embeddedMetadata?.artist || filenameParts?.[1]?.trim() || folderArtist || 'Unknown artist',
-        album: embeddedMetadata?.album || folderAlbum,
+        album: options.album || embeddedMetadata?.album || folderAlbum,
         duration: detectedDuration || 0,
         year: embeddedMetadata?.year || 0,
         genre: embeddedMetadata?.genre || 'Local',
@@ -4707,6 +4643,16 @@ export default function App() {
     if (imported.length) {
       setTracks(items => [...items.filter(item => !imported.some(track => track.localKey === item.localKey)), ...imported])
       setLocalKeys(keys => Array.from(new Set([...keys, ...newKeys])))
+      const importedIds = imported.map(track => track.id)
+      if (options.newPlaylist) {
+        const playlist: Playlist = { id: `${Date.now()}`, name: options.newPlaylist, trackIds: importedIds }
+        setPlaylists(items => [...items, playlist])
+        setSelectedPlaylistId(playlist.id)
+      } else if (options.playlistId) {
+        setPlaylists(items => items.map(item => item.id === options.playlistId
+          ? { ...item, trackIds: Array.from(new Set([...item.trackIds, ...importedIds])) }
+          : item))
+      }
       setView('local')
       setLocalImportState({ status: 'done', total: selectedFiles.length, completed, imported: imported.length, skipped, message: `${imported.length} ${imported.length === 1 ? 'track' : 'tracks'} added to Local Music.` })
       void (async () => {
@@ -4862,11 +4808,14 @@ export default function App() {
               playbackError={playbackError}
               lightColorMode={settings.lightColorMode}
               onSaveMetadata={saveActiveMetadata}
+              updateMetadataFromLyrics={isPro && settings.updateMetadataFromLyrics}
+              onApplyLyricsMetadata={applyLyricsMetadata}
             />
           )}
           {view === 'settings' && (
             <SettingsView
               settings={settings}
+              isPro={isPro}
               onChange={setSettings}
               devices={devices}
               onAddSource={addSource}
@@ -4875,8 +4824,6 @@ export default function App() {
               localTracks={localTracks}
               deviceProfile={deviceProfile}
               moodAnalysis={moodAnalysis}
-              shazamStatus={shazamStatus}
-              shazamIdentification={shazamIdentification}
               radioZip={radioZip}
               radioLocation={radioLocation}
               radioStationCount={radioTracks.length}
@@ -4910,8 +4857,11 @@ export default function App() {
         <LocalImportSheet
           state={localImportState}
           onFiles={importLocalFiles}
+          onDocuments={importLocalDocuments}
           onClose={() => setShowLocalImport(false)}
           onReset={() => setLocalImportState(EMPTY_LOCAL_IMPORT)}
+          albums={Array.from(new Set(localTracks.map(track => track.album))).filter(Boolean).sort()}
+          playlists={playlists}
         />
       )}
     </div>
