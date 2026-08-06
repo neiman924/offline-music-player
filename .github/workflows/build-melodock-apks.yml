@@ -1,4 +1,4 @@
-name: Build Melodock Pro APK
+name: Build Melodock Pro 1.7 APK
 
 on:
   push:
