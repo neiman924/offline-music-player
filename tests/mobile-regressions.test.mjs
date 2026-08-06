@@ -35,3 +35,24 @@ test('Android declares a foreground media playback service with controls', () =>
 test('Bluetooth connection cannot autoplay without an active Melodock track', () => {
   assert.match(service, /if \(hasTrack\) dispatchCommand\("play"\)/)
 })
+
+test('local import is a two-step Folder or Files flow', () => {
+  assert.match(player, />Choose Folder</)
+  assert.match(player, />Choose Files</)
+  assert.match(player, /Add these songs to a playlist\?/)
+  assert.match(player, /Existing playlist/)
+  assert.match(player, /New playlist/)
+  assert.match(player, /No playlist/)
+})
+
+test('matching playlist names add tracks and never replace the playlist', () => {
+  assert.match(player, /matchingPlaylist\.id/)
+  assert.match(player, /It will not replace it\./)
+  assert.match(player, /Array\.from\(new Set\(\[\.\.\.item\.trackIds, \.\.\.importedIds\]\)\)/)
+})
+
+test('Android document imports store URI metadata without saving audio blobs', () => {
+  const androidImport = player.slice(player.indexOf('const importLocalDocuments'), player.indexOf('const importLocalFiles'))
+  assert.match(androidImport, /documentUri: document\.uri/)
+  assert.doesNotMatch(androidImport, /saveLocalAudio/)
+})

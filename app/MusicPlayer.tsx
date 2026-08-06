@@ -2766,30 +2766,67 @@ type LocalImportState = {
 
 const EMPTY_LOCAL_IMPORT: LocalImportState = { status: 'idle', total: 0, completed: 0, imported: 0, skipped: 0, message: '' }
 
+type LocalImportOptions = { album: string; playlistId: string; newPlaylist: string }
+type LocalImportSelection =
+  | { kind: 'folder' | 'files'; documents: LocalDocument[]; files?: never }
+  | { kind: 'folder' | 'files'; files: File[]; documents?: never }
+
 function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, albums, playlists }: {
   state: LocalImportState
-  onFiles: (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => void
-  onDocuments: (documents: LocalDocument[], options: { album: string; playlistId: string; newPlaylist: string }) => void
+  onFiles: (files: File[] | null, options: LocalImportOptions) => void
+  onDocuments: (documents: LocalDocument[], options: LocalImportOptions) => void
   onClose: () => void
   onReset: () => void
   albums: string[]
   playlists: Playlist[]
 }) {
+  const [selection, setSelection] = useState<LocalImportSelection | null>(null)
+  const [picking, setPicking] = useState(false)
   const [album, setAlbum] = useState('')
   const [newAlbum, setNewAlbum] = useState('')
+  const [playlistChoice, setPlaylistChoice] = useState<'none' | 'existing' | 'new'>('none')
   const [playlistId, setPlaylistId] = useState('')
   const [newPlaylist, setNewPlaylist] = useState('')
   const busy = state.status === 'importing'
-  const destination = () => ({ album: newAlbum.trim() || album, playlistId, newPlaylist: newPlaylist.trim() })
+  const matchingPlaylist = playlists.find(item => item.name.localeCompare(newPlaylist.trim(), undefined, { sensitivity: 'accent' }) === 0)
+  const selectedCount = selection?.documents?.length ?? selection?.files?.length ?? 0
+  const destination = (): LocalImportOptions => ({
+    album: newAlbum.trim() || album,
+    playlistId: playlistChoice === 'existing' ? playlistId : playlistChoice === 'new' && matchingPlaylist ? matchingPlaylist.id : '',
+    newPlaylist: playlistChoice === 'new' && !matchingPlaylist ? newPlaylist.trim() : '',
+  })
   const pickNative = async (kind: 'files' | 'folder') => {
-    const documents = kind === 'folder' ? await pickLocalMusicFolder() : await pickLocalAudioFiles()
-    if (documents.length) onDocuments(documents, destination())
+    setPicking(true)
+    try {
+      const documents = kind === 'folder' ? await pickLocalMusicFolder() : await pickLocalAudioFiles()
+      if (documents.length) setSelection({ kind, documents })
+    } finally {
+      setPicking(false)
+    }
   }
-  const pickFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = event.currentTarget.files
-    onFiles(files, { album: newAlbum.trim() || album, playlistId, newPlaylist: newPlaylist.trim() })
+  const pickFiles = (kind: 'files' | 'folder') => (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files || [])
+    if (files.length) setSelection({ kind, files })
     event.currentTarget.value = ''
   }
+  const importSelection = () => {
+    if (!selection) return
+    const options = destination()
+    if (selection.documents) onDocuments(selection.documents, options)
+    else onFiles(selection.files, options)
+  }
+  const resetFlow = () => {
+    setSelection(null)
+    setPlaylistChoice('none')
+    setPlaylistId('')
+    setNewPlaylist('')
+    setAlbum('')
+    setNewAlbum('')
+    onReset()
+  }
+  const canImport = Boolean(selection)
+    && (playlistChoice !== 'existing' || Boolean(playlistId))
+    && (playlistChoice !== 'new' || Boolean(newPlaylist.trim()))
 
   return (
     <div className="android-sheet-backdrop" role="presentation" onClick={() => { if (!busy) onClose() }}>
@@ -2799,7 +2836,7 @@ function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, album
           <span className="android-sheet-icon"><IconDownload size={22} /></span>
           <span>
             <h2 id="local-import-title">Add music from this device</h2>
-            <p>Choose a local music folder to add every supported song, or select individual files.</p>
+            <p>{selection ? 'Choose where the selected music should appear.' : 'Start with a folder or select individual audio files.'}</p>
           </span>
           <button className="android-sheet-close" type="button" onClick={onClose} disabled={busy} aria-label="Close music importer">×</button>
         </header>
@@ -2808,7 +2845,7 @@ function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, album
           <div className="android-import-progress" role="status">
             <div><span style={{ width: `${state.total ? (state.completed / state.total) * 100 : 0}%` }} /></div>
             <strong>Adding music… {state.completed} of {state.total}</strong>
-            <small>Keep TuneStack open until the import finishes.</small>
+            <small>Keep Melodock open until the links are added.</small>
           </div>
         )}
 
@@ -2819,28 +2856,36 @@ function LocalImportSheet({ state, onFiles, onDocuments, onClose, onReset, album
           </div>
         )}
 
-        {!busy && (
-          <div className="android-import-destination">
-            <label><span>Album</span><select value={album} onChange={event => { setAlbum(event.target.value); setNewAlbum('') }}><option value="">Keep the album from each file</option>{albums.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
-            <label><span>Or create a new album</span><input value={newAlbum} onChange={event => { setNewAlbum(event.target.value); if (event.target.value) setAlbum('') }} placeholder="New album name" /></label>
-            <label><span>Playlist (optional)</span><select value={playlistId} onChange={event => { setPlaylistId(event.target.value); setNewPlaylist('') }}><option value="">Do not add to a playlist</option>{playlists.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-            <label><span>Or create a new playlist</span><input value={newPlaylist} onChange={event => { setNewPlaylist(event.target.value); if (event.target.value) setPlaylistId('') }} placeholder="New playlist name" /></label>
-          </div>
-        )}
-
-        {!busy && (
+        {!busy && !selection && state.status !== 'done' && (
           <div className="android-import-options">
             {isNativeAndroid() ? (<>
-              <button type="button" onClick={() => void pickNative('files')}><span className="android-option-icon"><IconMusic size={21} /></span><span><strong>Choose audio files</strong><small>Keep read-only links to selected songs</small></span><b aria-hidden="true">›</b></button>
-              <button type="button" onClick={() => void pickNative('folder')}><span className="android-option-icon"><IconFolder size={21} /></span><span><strong>Choose a local music folder</strong><small>Add every song without copying the folder</small></span><b aria-hidden="true">›</b></button>
+              <button type="button" disabled={picking} onClick={() => void pickNative('folder')}><span className="android-option-icon"><IconFolder size={26} /></span><span><strong>Choose Folder</strong><small>Link every supported song in one folder</small></span><b aria-hidden="true">›</b></button>
+              <button type="button" disabled={picking} onClick={() => void pickNative('files')}><span className="android-option-icon"><IconMusic size={26} /></span><span><strong>Choose Files</strong><small>Pick one or more individual songs</small></span><b aria-hidden="true">›</b></button>
             </>) : (<>
-              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles} /><span className="android-option-icon"><IconMusic size={21} /></span><span><strong>Choose audio files</strong><small>Select one or several songs</small></span><b aria-hidden="true">›</b></label>
-              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }} onChange={pickFiles} /><span className="android-option-icon"><IconFolder size={21} /></span><span><strong>Choose a local music folder</strong><small>Select all supported songs inside it</small></span><b aria-hidden="true">›</b></label>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden ref={element => { if (element) { element.setAttribute('webkitdirectory', ''); element.setAttribute('directory', '') } }} onChange={pickFiles('folder')} /><span className="android-option-icon"><IconFolder size={26} /></span><span><strong>Choose Folder</strong><small>Select all supported songs inside it</small></span><b aria-hidden="true">›</b></label>
+              <label><input type="file" accept="audio/*,.flac,.m4a,.ogg,.opus,.wav,.aiff,.wma" multiple hidden onChange={pickFiles('files')} /><span className="android-option-icon"><IconMusic size={26} /></span><span><strong>Choose Files</strong><small>Pick one or more individual songs</small></span><b aria-hidden="true">›</b></label>
             </>)}
           </div>
         )}
-        <div className="android-import-note">{isNativeAndroid() ? 'Melodock stores only read-only links and metadata. Music stays in the selected folder and plays directly from there.' : 'Browser imports may use private browser storage. The Android app uses no-copy folder references.'}</div>
-        {state.status === 'done' && <button className="android-import-more" type="button" onClick={onReset}>Add more music</button>}
+
+        {!busy && selection && state.status !== 'done' && (
+          <div className="android-import-organize">
+            <div className="android-selection-summary"><span className="android-option-icon">{selection.kind === 'folder' ? <IconFolder size={23} /> : <IconMusic size={23} />}</span><span><strong>{selectedCount} {selectedCount === 1 ? 'song' : 'songs'} selected</strong><small>{selection.kind === 'folder' ? 'Folder linked and ready' : 'Files linked and ready'}</small></span><button type="button" onClick={() => setSelection(null)}>Change</button></div>
+            <fieldset className="android-playlist-choice">
+              <legend>Add these songs to a playlist?</legend>
+              <label className={playlistChoice === 'existing' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'existing'} onChange={() => setPlaylistChoice('existing')} /><span><strong>Existing playlist</strong><small>Add songs without removing anything already there</small></span></label>
+              {playlistChoice === 'existing' && <select aria-label="Choose existing playlist" value={playlistId} onChange={event => setPlaylistId(event.target.value)}><option value="">Choose a playlist…</option>{playlists.map(item => <option key={item.id} value={item.id}>{item.name} ({item.trackIds.length})</option>)}</select>}
+              <label className={playlistChoice === 'new' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'new'} onChange={() => setPlaylistChoice('new')} /><span><strong>New playlist</strong><small>Create a playlist for these songs</small></span></label>
+              {playlistChoice === 'new' && <input aria-label="New playlist name" autoFocus value={newPlaylist} onChange={event => setNewPlaylist(event.target.value)} placeholder="Playlist name" />}
+              {playlistChoice === 'new' && matchingPlaylist && <div className="android-playlist-match"><IconCheck size={17} /><span><strong>“{matchingPlaylist.name}” already exists</strong><small>Melodock will add these songs to that playlist. It will not replace it.</small></span></div>}
+              <label className={playlistChoice === 'none' ? 'selected' : ''}><input type="radio" name="playlist-choice" checked={playlistChoice === 'none'} onChange={() => setPlaylistChoice('none')} /><span><strong>No playlist</strong><small>Add songs only to Local Music</small></span></label>
+            </fieldset>
+            <details className="android-album-options"><summary>Album options</summary><div><label><span>Use existing album</span><select value={album} onChange={event => { setAlbum(event.target.value); setNewAlbum('') }}><option value="">Keep album information from each song</option>{albums.map(name => <option key={name} value={name}>{name}</option>)}</select></label><label><span>Or use a new album name</span><input value={newAlbum} onChange={event => { setNewAlbum(event.target.value); if (event.target.value) setAlbum('') }} placeholder="Optional album name" /></label></div></details>
+            <button className="android-import-confirm" type="button" disabled={!canImport} onClick={importSelection}>Add {selectedCount} {selectedCount === 1 ? 'song' : 'songs'}</button>
+          </div>
+        )}
+        <div className="android-import-note">{isNativeAndroid() ? 'No copies are created. Melodock stores read-only links and plays music directly from its original folder.' : 'Browser imports may use private browser storage. The Android app uses no-copy folder references.'}</div>
+        {state.status === 'done' && <button className="android-import-more" type="button" onClick={resetFlow}>Add more music</button>}
       </section>
     </div>
   )
@@ -4527,7 +4572,7 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
     }
   }, [activeTrack, playingFromDevice])
 
-  const importLocalDocuments = useCallback((documents: LocalDocument[], options: { album: string; playlistId: string; newPlaylist: string }) => {
+  const importLocalDocuments = useCallback((documents: LocalDocument[], options: LocalImportOptions) => {
     if (!documents.length) return
     const imported = documents.map((document): Track => {
       const key = `document:${document.uri}`
@@ -4540,7 +4585,7 @@ export default function App({ isPro = false }: { isPro?: boolean }) {
     setLocalImportState({ status: 'done', total: documents.length, completed: documents.length, imported: documents.length, skipped: 0, message: `${documents.length} ${documents.length === 1 ? 'song' : 'songs'} linked without copying.` })
   }, [])
 
-  const importLocalFiles = useCallback(async (files: FileList | null, options: { album: string; playlistId: string; newPlaylist: string }) => {
+  const importLocalFiles = useCallback(async (files: File[] | FileList | null, options: LocalImportOptions) => {
     if (!files?.length) return
     const selectedFiles = Array.from(files)
     setLocalImportState({ status: 'importing', total: selectedFiles.length, completed: 0, imported: 0, skipped: 0, message: '' })
